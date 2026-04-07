@@ -9,10 +9,14 @@ describe('buildCallbacks', () => {
   let progress: ProgressTracker;
   let logger: Logger;
   let touchActivity: jest.Mock;
+  let onToolStart: jest.Mock;
+  let onToolEnd: jest.Mock;
+  let onToolUseTracked: jest.Mock;
   let onImageContent: jest.Mock;
   let onTurnResult: jest.Mock;
   let enqueueMainChunks: jest.Mock;
   let enqueueTodoChunks: jest.Mock;
+  let enqueueTodoStop: jest.Mock;
   let setTypingStatus: jest.Mock;
   let callbacks: SessionCallbacks;
 
@@ -20,20 +24,28 @@ describe('buildCallbacks', () => {
     progress = new ProgressTracker();
     logger = new Logger({ level: 'warn' });
     touchActivity = jest.fn();
+    onToolStart = jest.fn();
+    onToolEnd = jest.fn();
+    onToolUseTracked = jest.fn();
     onImageContent = jest.fn();
     onTurnResult = jest.fn(() => false);
     enqueueMainChunks = jest.fn();
     enqueueTodoChunks = jest.fn();
+    enqueueTodoStop = jest.fn();
     setTypingStatus = jest.fn();
 
     callbacks = buildCallbacks({
       progress,
       logger,
       touchActivity,
+      onToolStart,
+      onToolEnd,
+      onToolUseTracked,
       onImageContent,
       onTurnResult,
       enqueueMainChunks,
       enqueueTodoChunks,
+      enqueueTodoStop,
       setTypingStatus,
     });
   });

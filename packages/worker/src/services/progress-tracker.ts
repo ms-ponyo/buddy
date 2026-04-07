@@ -5,7 +5,7 @@
 import type { AnyChunk, TaskUpdateChunk, PlanUpdateChunk, URLSourceElement } from '@slack/types';
 import type { RichTextBlock, TaskCardBlock, PlanBlock } from '@slack/types';
 import type { TodoItem } from '../types.js';
-import { formatDiffMarkdown } from '../util/diff-formatter.js';
+import { formatDiffMarkdownEx, formatFileCreateMarkdown, formatFullDiff } from '../util/diff-formatter.js';
 import { getTunnelStatus } from '../mcp-servers/vscode-tunnel-server.js';
 
 let cachedTunnelName: string | null | undefined;
@@ -39,6 +39,7 @@ interface ToolEntry {
   resultSummary?: string;
   source?: { type: 'url'; url: string; text: string };
   editDiff?: { filePath: string; oldString: string; newString: string };
+  writeContent?: { filePath: string; content: string };
 }
 
 interface ReasoningCard {
@@ -138,6 +139,13 @@ class CardManager {
         const newStr = typeof input.new_string === 'string' ? input.new_string : undefined;
         if (oldStr !== undefined && newStr !== undefined) {
           entry.editDiff = { filePath: fp, oldString: oldStr, newString: newStr };
+        }
+      }
+      // Store content for Write tools
+      if (toolName === 'Write' && fp) {
+        const content = typeof input.content === 'string' ? input.content : undefined;
+        if (content !== undefined) {
+          entry.writeContent = { filePath: fp, content };
         }
       }
     } else if (toolName === 'WebFetch') {
@@ -420,8 +428,12 @@ export class ProgressTracker {
   private cardSentToolCount = new Map<string, number>();
   private cardSentSourceUrls = new Map<string, Set<string>>();
 
-  /** Tracks which Edit tool diffs have been emitted as markdown_text chunks. */
+  /** Tracks which Edit/Write tool diffs have been emitted as markdown_text chunks. */
   private editDiffsSent = new Set<string>();
+  private writeContentSent = new Set<string>();
+
+  /** Pending file uploads for truncated content (drained by worker-loop). */
+  private _pendingUploads: { filename: string; content: string; caption: string }[] = [];
 
   // ── Plan title ──────────────────────────────────────────────────
 
@@ -547,6 +559,7 @@ export class ProgressTracker {
 
   onPermissionResult(toolUseId: string, approved: boolean, opts?: {
     toolNames?: string[];
+    lockTexts?: string[];
     alwaysAllow?: boolean;
     alwaysPattern?: string;
   }): void {
@@ -554,15 +567,17 @@ export class ProgressTracker {
     if (!found) return;
 
     // Build a descriptive permission result line.
+    // Strip markdown backticks from lockText for plain-text stream display.
+    const commandDesc = opts?.lockTexts?.[0]?.replace(/`/g, '');
     let label: string;
     if (!approved) {
-      label = 'Denied';
+      label = commandDesc ? `Denied ${commandDesc}` : 'Denied';
     } else if (opts?.alwaysAllow && opts.alwaysPattern) {
       label = `Always allowed ${opts.alwaysPattern}`;
     } else if (opts?.alwaysAllow) {
       label = 'Always allowed';
     } else {
-      label = 'Allowed';
+      label = commandDesc ? `Allowed ${commandDesc}` : 'Allowed';
     }
 
     // Add as a new tool entry so it appears in the stream output
@@ -617,7 +632,7 @@ export class ProgressTracker {
         allChunks.push(chunk);
       }
 
-      // Emit edit diffs as separate markdown_text chunks
+      // Emit edit diffs and write content as separate markdown_text chunks
       for (const tool of card.tools) {
         if (
           tool.name === 'Edit' &&
@@ -626,22 +641,64 @@ export class ProgressTracker {
           !this.editDiffsSent.has(tool.toolUseId)
         ) {
           this.editDiffsSent.add(tool.toolUseId);
-          const diffText = formatDiffMarkdown({
+          const diffResult = formatDiffMarkdownEx({
             file_path: shortPath(tool.editDiff.filePath),
             old_string: tool.editDiff.oldString,
             new_string: tool.editDiff.newString,
           });
-          if (diffText) {
+          if (diffResult) {
             allChunks.push({
               type: 'markdown_text',
-              text: diffText + '\n\n',
+              text: diffResult.text + '\n\n',
             } as AnyChunk);
+            if (diffResult.truncated) {
+              const fullDiff = formatFullDiff({
+                file_path: tool.editDiff.filePath,
+                old_string: tool.editDiff.oldString,
+                new_string: tool.editDiff.newString,
+              });
+              if (fullDiff) {
+                const fname = (tool.editDiff.filePath.split('/').pop() ?? 'edit') + '.diff';
+                this._pendingUploads.push({ filename: fname, content: fullDiff, caption: `Full diff for ${shortPath(tool.editDiff.filePath)}` });
+              }
+            }
+          }
+        }
+
+        if (
+          tool.name === 'Write' &&
+          tool.status === 'complete' &&
+          tool.writeContent &&
+          !this.writeContentSent.has(tool.toolUseId)
+        ) {
+          this.writeContentSent.add(tool.toolUseId);
+          const createResult = formatFileCreateMarkdown(
+            shortPath(tool.writeContent.filePath),
+            tool.writeContent.content,
+          );
+          if (createResult) {
+            allChunks.push({
+              type: 'markdown_text',
+              text: createResult.text + '\n\n',
+            } as AnyChunk);
+            if (createResult.truncated) {
+              const fname = tool.writeContent.filePath.split('/').pop() ?? 'file';
+              this._pendingUploads.push({ filename: fname, content: tool.writeContent.content, caption: `Full content of ${shortPath(tool.writeContent.filePath)}` });
+            }
           }
         }
       }
     }
 
     return allChunks;
+  }
+
+  /** Drain pending file uploads (for truncated edits/creates). Returns and clears the queue. */
+  drainPendingUploads(): { filename: string; content: string; caption: string }[] {
+    if (this._pendingUploads.length === 0) return [];
+    const uploads = this._pendingUploads;
+    this._pendingUploads = [];
+    return uploads;
   }
 
   buildTodoChunks(): AnyChunk[] {
@@ -695,7 +752,19 @@ export class ProgressTracker {
     // currently running.  During streaming ▸ is fine for tools that just started.
     const allLines = this.cardMgr.buildToolLines(card.tools);
     const sentToolCount = this.cardSentToolCount.get(card.id) ?? 0;
-    const newToolLines = allLines.slice(sentToolCount);
+    const rawNewLines = allLines.slice(sentToolCount);
+
+    // Deduplicate: skip lines identical to the previously emitted line
+    // (e.g. two consecutive "▸ Edit README.md" from multiple edits to same file)
+    const lastSentLine = sentToolCount > 0 ? allLines[sentToolCount - 1] : null;
+    const newToolLines: string[] = [];
+    let prevLine = lastSentLine;
+    for (const line of rawNewLines) {
+      if (line !== prevLine) {
+        newToolLines.push(line);
+      }
+      prevLine = line;
+    }
 
     const allSources = this.cardMgr.getCardSources(card);
     const sentUrls = this.cardSentSourceUrls.get(card.id) ?? new Set<string>();
@@ -723,7 +792,7 @@ export class ProgressTracker {
 
 export function shortPath(filePath: string): string {
   const parts = filePath.split('/');
-  return parts.length > 2 ? parts.slice(-2).join('/') : filePath;
+  return parts.length > 3 ? parts.slice(-3).join('/') : filePath;
 }
 
 function truncate(s: string, max: number): string {

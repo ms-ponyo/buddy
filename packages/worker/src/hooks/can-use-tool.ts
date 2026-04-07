@@ -17,28 +17,7 @@ export interface CanUseToolHookDeps {
   logger: Logger;
   channel: string;
   threadTs: string;
-  previewMode: 'off' | 'destructive' | 'moderate';
-  /** When set, Edit/Write/NotebookEdit targeting files under this dir are auto-allowed. */
-  projectDir?: string;
 }
-
-// ── Info tools that are always auto-allowed ──────────────────────
-
-const INFO_TOOLS = new Set([
-  'Read',
-  'Grep',
-  'Glob',
-  'WebFetch',
-  'WebSearch',
-]);
-
-// ── File tools auto-allowed in acceptEdits mode ──────────────────
-
-const FILE_TOOLS = new Set([
-  'Edit',
-  'Write',
-  'NotebookEdit',
-]);
 
 // ── Factory ───────────────────────────────────────────────────────
 
@@ -54,7 +33,6 @@ export function createCanUseToolHook(deps: CanUseToolHookDeps): CanUseTool {
     logger,
     channel,
     threadTs,
-    projectDir,
   } = deps;
 
   /** Track patterns the user has already "Always allowed" so we don't suggest them again. */
@@ -65,8 +43,7 @@ export function createCanUseToolHook(deps: CanUseToolHookDeps): CanUseTool {
     toolInput: Record<string, unknown>,
     options,
   ): Promise<PermissionResult> => {
-    const { toolUseID, suggestions, title, description, blockedPath } = options;
-    const permissionMode = configOverrides.getPermissionMode();
+    const { toolUseID, suggestions, title, description } = options;
 
     // ── AskUserQuestion: delegate to PermissionManager ──────────
     if (toolName === 'AskUserQuestion') {
@@ -88,69 +65,57 @@ export function createCanUseToolHook(deps: CanUseToolHookDeps): CanUseTool {
       };
     }
 
-    // ── ExitPlanMode: auto-allow (review handled by PreToolUse hook) ─
+    // ── ExitPlanMode: deny if it reaches here ─────────────────────
+    // The PreToolUse hook handles plan review and returns allow/deny directly.
+    // If ExitPlanMode reaches canUseTool, the hook failed (timeout, error, etc.)
+    // — deny rather than silently auto-allowing unapproved plans.
     if (toolName === 'ExitPlanMode') {
-      logger.info('ExitPlanMode reached canUseTool (hook already handled review)');
-      return { behavior: 'allow', updatedInput: toolInput, toolUseID };
+      logger.warn('ExitPlanMode reached canUseTool unexpectedly (PreToolUse hook should have handled it)');
+      return {
+        behavior: 'deny',
+        message: 'Plan review was not completed — please re-enter plan mode and try again',
+        toolUseID,
+      };
     }
 
-    // ── bypassPermissions mode: allow everything ──────────────
-    if (permissionMode === 'bypassPermissions' || permissionMode === 'auto') {
-      logger.info('Auto-allowing tool (bypassPermissions mode)', { tool: toolName });
-      return { behavior: 'allow', updatedInput: toolInput, toolUseID };
-    }
-
-    // ── plan mode: allow everything (plan review handles gating) ──
-    if (permissionMode === 'plan') {
-      logger.info('Auto-allowing tool (plan mode)', { tool: toolName });
-      return { behavior: 'allow', updatedInput: toolInput, toolUseID };
-    }
-
-    // ── Info tools: always auto-allow ──────────────────────────
-    if (INFO_TOOLS.has(toolName)) {
-      return { behavior: 'allow', updatedInput: toolInput, toolUseID };
-    }
-
-    // ── acceptEdits mode: auto-allow file tools ────────────────
-    if (permissionMode === 'acceptEdits' && FILE_TOOLS.has(toolName)) {
-      logger.info('Auto-allowing file tool (acceptEdits mode)', { tool: toolName });
-      return { behavior: 'allow', updatedInput: toolInput, toolUseID };
-    }
-
-    // ── File tools within projectDir: auto-allow ─────────────
-    if (projectDir && FILE_TOOLS.has(toolName)) {
-      const filePath = typeof toolInput.file_path === 'string'
-        ? toolInput.file_path
-        : typeof toolInput.notebook_path === 'string'
-          ? toolInput.notebook_path
-          : undefined;
-      if (filePath && filePath.startsWith(projectDir)) {
-        logger.info('Auto-allowing file tool (within projectDir)', { tool: toolName, filePath });
-        return { behavior: 'allow', updatedInput: toolInput, toolUseID };
+    // ── Tool overrides: enforce allow/deny lists ──────────────
+    const toolOverrides = configOverrides.getToolOverrides();
+    if (toolOverrides) {
+      const { allowedTools, disallowedTools } = toolOverrides;
+      if (disallowedTools?.includes(toolName)) {
+        logger.info('Tool denied by tool overrides', { tool: toolName });
+        return {
+          behavior: 'deny',
+          message: `Tool \`${toolName}\` is blocked by thread tool restrictions. Use \`!tools clear\` to reset.`,
+          toolUseID,
+        };
+      }
+      if (allowedTools && allowedTools.length > 0 && !allowedTools.includes(toolName)) {
+        logger.info('Tool not in allowed list', { tool: toolName, allowedTools });
+        return {
+          behavior: 'deny',
+          message: `Tool \`${toolName}\` is not in the allowed tools list (${allowedTools.join(', ')}). Use \`!tools clear\` to reset.`,
+          toolUseID,
+        };
       }
     }
 
     // ── Classify risk ──────────────────────────────────────────
     const risk: ToolRisk = classifyToolRisk(toolName, toolInput);
 
-    // ── dontAsk mode: allow non-destructive ────────────────────
-    if (permissionMode === 'dontAsk' && risk !== 'destructive') {
-      logger.info('Auto-allowing tool (dontAsk mode, non-destructive)', { tool: toolName, risk });
-      return { behavior: 'allow', updatedInput: toolInput, toolUseID };
-    }
-
     // ── Request permission from user ───────────────────────────
     logger.info('Permission requested via canUseTool', {
-      tool: toolName, risk, title, blockedPath,
+      tool: toolName, risk, title,
     });
 
     // Prefer the SDK-provided title/description for the Slack prompt
     // (e.g. folder access: "Claude will have read and write access to files in ~/Downloads")
     const lockText = title || formatLockText(toolName, toolInput, description);
 
-    const rawSuggestions = suggestions && suggestions.length > 0
-      ? suggestions
-      : generateFallbackSuggestions(toolName, toolInput);
+    const sdkSuggestions = suggestions && suggestions.length > 0 ? suggestions : undefined;
+    const rawSuggestions = sdkSuggestions && !hasCommentPatterns(sdkSuggestions)
+      ? sdkSuggestions
+      : generateFallbackSuggestions(toolName, toolInput) ?? sdkSuggestions;
     const filteredSuggestions = filterApprovedSuggestions(rawSuggestions, approvedPatterns);
 
     const permResult = await permissions.requestPermission({
@@ -189,6 +154,10 @@ export function createCanUseToolHook(deps: CanUseToolHookDeps): CanUseTool {
 
 // ── Helpers ───────────────────────────────────────────────────────
 
+// Slack section block mrkdwn text has a 3000-char limit.
+// We target ~2800 to leave room for the "*Permission requested:* " prefix and "Always pattern" line.
+const MAX_LOCK_TEXT_LENGTH = 2800;
+
 function formatLockText(
   toolName: string,
   toolInput: Record<string, unknown>,
@@ -197,10 +166,17 @@ function formatLockText(
   if (toolName === 'Bash' && typeof toolInput.command === 'string') {
     // Collapse newlines to spaces so multi-line commands (e.g. python3 -c "...") display inline
     const collapsed = toolInput.command.replace(/\n/g, ' ').replace(/\s{2,}/g, ' ');
-    const cmd = collapsed.length > 100
-      ? collapsed.slice(0, 100) + '...'
-      : collapsed;
-    return `\`Bash\` -> \`${cmd}\``;
+    if (collapsed.length > 100) {
+      // Show command in a code block, truncating if needed to stay under Slack's mrkdwn limit
+      const prefix = '`Bash` ->\n```\n';
+      const suffix = '\n```';
+      const maxCmd = MAX_LOCK_TEXT_LENGTH - prefix.length - suffix.length;
+      const truncated = collapsed.length > maxCmd
+        ? collapsed.slice(0, maxCmd - 4) + ' ...'
+        : collapsed;
+      return `${prefix}${truncated}${suffix}`;
+    }
+    return `\`Bash\` -> \`${collapsed}\``;
   }
   if ((toolName === 'Write' || toolName === 'Edit') && typeof toolInput.file_path === 'string') {
     return `\`${toolName}\` -> \`${toolInput.file_path}\``;
@@ -280,13 +256,84 @@ const INLINE_SCRIPT_COMMANDS = new Set([
   'python', 'python3', 'python2', 'ruby', 'perl', 'node', 'sh', 'bash', 'zsh',
 ]);
 
+/**
+ * Split a command string on unquoted pipe and logical operators (|, ||, &&, |&).
+ * Characters inside single or double quotes, or after a backslash escape,
+ * are never treated as operators.
+ */
+function splitOnUnquotedOperators(command: string): string[] {
+  const segments: string[] = [];
+  let current = '';
+  let inSingle = false;
+  let inDouble = false;
+  let i = 0;
+
+  while (i < command.length) {
+    const ch = command[i];
+
+    // Backslash escape: consume next char literally
+    if (ch === '\\' && i + 1 < command.length) {
+      current += ch + command[i + 1];
+      i += 2;
+      continue;
+    }
+
+    // Track quote state
+    if (ch === "'" && !inDouble) { inSingle = !inSingle; current += ch; i++; continue; }
+    if (ch === '"' && !inSingle) { inDouble = !inDouble; current += ch; i++; continue; }
+
+    // Only match operators outside quotes
+    if (!inSingle && !inDouble) {
+      // ||
+      if (ch === '|' && command[i + 1] === '|') {
+        segments.push(current.trim());
+        current = '';
+        i += 2;
+        continue;
+      }
+      // |&
+      if (ch === '|' && command[i + 1] === '&') {
+        segments.push(current.trim());
+        current = '';
+        i += 2;
+        continue;
+      }
+      // |
+      if (ch === '|') {
+        segments.push(current.trim());
+        current = '';
+        i++;
+        continue;
+      }
+      // &&
+      if (ch === '&' && command[i + 1] === '&') {
+        segments.push(current.trim());
+        current = '';
+        i += 2;
+        continue;
+      }
+    }
+
+    current += ch;
+    i++;
+  }
+
+  segments.push(current.trim());
+  return segments;
+}
+
 export function extractBashPatterns(command: string): string[] {
+  // Strip shell comment lines (lines starting with optional whitespace + #)
+  const withoutComments = command.split('\n')
+    .filter(line => !/^\s*#/.test(line))
+    .join('\n');
+
   // Strip chained `cd <path> &&` prefixes
-  const stripped = command.replace(/^(?:cd\s+\S+\s*&&\s*)+/, '').trim();
+  const stripped = withoutComments.replace(/^(?:cd\s+\S+\s*&&\s*)+/, '').trim();
   if (!stripped) return [];
 
-  // Split on pipes and logical operators, then extract pattern from each segment
-  const segments = stripped.split(/\s*(?:\|&|\||&&|\|\|)\s*/);
+  // Split on pipes and logical operators, respecting quoted strings
+  const segments = splitOnUnquotedOperators(stripped);
   const seen = new Set<string>();
   const patterns: string[] = [];
 
@@ -345,6 +392,25 @@ function generateFallbackSuggestions(
     behavior: 'allow',
     destination: 'session',
   }];
+}
+
+/**
+ * Check if SDK-provided suggestions contain rules whose ruleContent starts with '#'
+ * (i.e. the SDK extracted a shell comment as the pattern prefix).
+ * When true, we prefer our own fallback pattern extraction which strips comments.
+ */
+function hasCommentPatterns(suggestions: unknown[]): boolean {
+  for (const s of suggestions) {
+    if (typeof s !== 'object' || s === null) continue;
+    const rules = (s as Record<string, unknown>).rules;
+    if (!Array.isArray(rules)) continue;
+    for (const rule of rules) {
+      if (typeof rule !== 'object' || rule === null) continue;
+      const { ruleContent } = rule as Record<string, unknown>;
+      if (typeof ruleContent === 'string' && ruleContent.startsWith('#')) return true;
+    }
+  }
+  return false;
 }
 
 /**

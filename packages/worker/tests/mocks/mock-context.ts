@@ -7,7 +7,6 @@ import type { WorkerContext } from '../../src/context.js';
 import { ProgressTracker } from '../../src/services/progress-tracker.js';
 import { ConfigOverrides } from '../../src/services/config-overrides.js';
 import { PermissionManager } from '../../src/services/permission-manager.js';
-import { InteractiveBridge } from '../../src/services/interactive-bridge.js';
 import { McpRegistry } from '../../src/services/mcp-registry.js';
 import { ClaudeSessionService } from '../../src/services/claude-session.js';
 import { WorkerLoop } from '../../src/orchestration/worker-loop.js';
@@ -36,8 +35,8 @@ const DEFAULT_CONFIG: BuddyConfig = {
   triggerEmoji: 'robot_face',
   projectMappingsFile: '',
   mcpServers: {},
+  enabledMcpServers: [],
   plugins: [],
-  interactiveBridgePatterns: [],
   socketPath: '/tmp/test.sock',
   persistenceSocket: '/tmp/persistence.sock',
   gatewaySocket: '/tmp/gateway.sock',
@@ -76,7 +75,6 @@ export function mockWorkerContext(overrides?: Partial<WorkerContext>): WorkerCon
   const progress = new ProgressTracker();
   const configOverrides = new ConfigOverrides();
   const permissions = new PermissionManager({ slack, logger });
-  const bridge = new InteractiveBridge({ slack, logger });
   const mcpRegistry = new McpRegistry();
 
   // ClaudeSessionService needs a queryFn; provide a no-op stub for tests.
@@ -95,7 +93,6 @@ export function mockWorkerContext(overrides?: Partial<WorkerContext>): WorkerCon
     claudeSession,
     progress,
     permissions,
-    bridge,
     configOverrides,
     mcpRegistry,
     logger,
@@ -122,7 +119,7 @@ export function mockWorkerContext(overrides?: Partial<WorkerContext>): WorkerCon
     persistence,
     progress,
     permissions,
-    bridge,
+    interactiveBash: { start: jest.fn(), sendInput: jest.fn(), cleanup: jest.fn() } as any,
     configOverrides,
     mcpRegistry,
     claudeSession,

@@ -26,7 +26,10 @@ function makeQueueMessage(overrides: Partial<QueueMessage> & { payload?: Record<
 
 interface MockBotCommandRouter {
   parse: jest.Mock<{ command: string; args: string } | undefined, [string]>;
+  hasCommand: jest.Mock<boolean, [string]>;
   execute: jest.Mock<Promise<{ type: string; reply?: string; clearSession?: boolean }>, [{ command: string; args: string }]>;
+  rewriteSlashCommand: jest.Mock<string, [string]>;
+  isSDKSlashCommand: jest.Mock<boolean, [string]>;
 }
 
 interface MockDispatchHandler {
@@ -40,10 +43,13 @@ interface MockDispatchHandler {
 function makeBotCommandRouter(): MockBotCommandRouter {
   return {
     parse: jest.fn((_text: string) => undefined),
+    hasCommand: jest.fn((_name: string) => true),
     execute: jest.fn(async (_cmd: { command: string; args: string }) => ({
       type: 'handled' as const,
       reply: 'ok',
     })),
+    rewriteSlashCommand: jest.fn((text: string) => text.replace(/^!/, '/')),
+    isSDKSlashCommand: jest.fn((_name: string) => false),
   };
 }
 
@@ -79,6 +85,7 @@ describe('LiteMessageHandler', () => {
       dispatchHandler: dispatchHandler as any,
       persistence: persistence as any,
       slack: slack as any,
+      config: { adminUserIds: [], allowedUserIds: [], allowedChannelIds: [] } as any,
       logger: logger as any,
       channel: 'C123',
       threadTs: '1111.2222',

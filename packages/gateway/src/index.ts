@@ -48,12 +48,46 @@ async function main() {
   // Initialize components
   const registry = new SessionRegistry(logger);
 
+  // ── Crash-loop protection ──────────────────────────────────────
+  // Track recent crash timestamps per threadKey to detect crash loops.
+  const MAX_CRASHES = 5;
+  const CRASH_WINDOW_MS = 60_000;
+  const crashHistory = new Map<string, number[]>();
+
+  /** Returns true if the thread has exceeded the crash-loop threshold. */
+  function isCrashLooping(threadKey: string): boolean {
+    const now = Date.now();
+    const timestamps = crashHistory.get(threadKey) ?? [];
+    // Keep only crashes within the window
+    const recent = timestamps.filter(t => now - t < CRASH_WINDOW_MS);
+    recent.push(now);
+    crashHistory.set(threadKey, recent);
+    return recent.length > MAX_CRASHES;
+  }
+
+  /** Clear crash history for a thread (e.g. after a successful run or manual restart). */
+  function clearCrashHistory(threadKey: string): void {
+    crashHistory.delete(threadKey);
+  }
+
   const workerManager = new WorkerManager(
     config,
     registry,
     logger,
     async (threadKey, expected) => {
       if (!expected) {
+        // Crash-loop protection: stop respawning if crashing too fast
+        if (isCrashLooping(threadKey)) {
+          const [channel, threadTs] = threadKey.split(':');
+          logger.error('Worker crash loop detected, stopping respawn', { threadKey, maxCrashes: MAX_CRASHES, windowMs: CRASH_WINDOW_MS });
+          app.client.chat.postMessage({
+            channel,
+            thread_ts: threadTs,
+            text: `Worker crash loop detected (${MAX_CRASHES}+ crashes in ${CRASH_WINDOW_MS / 1000}s) — stopping auto-respawn. Use \`!restart\` to retry.`,
+          }).catch(() => {});
+          return;
+        }
+
         const [channel, threadTs] = threadKey.split(':');
         app.client.chat.postMessage({
           channel,
@@ -77,6 +111,7 @@ async function main() {
                 model: config.defaultModel,
                 permissionMode: config.defaultPermissionMode,
                 mcpServers: config.mcpServers,
+                anthropicApiKey: config.anthropicApiKey,
               };
               workerManager.spawn(threadKey, workerConfig);
             }
@@ -91,6 +126,12 @@ async function main() {
   // Register lite worker exit handler
   workerManager.setLiteWorkerExitHandler(async (threadKey, expected) => {
     if (!expected) {
+      // Crash-loop protection (shared history with main worker)
+      if (isCrashLooping(`lite:${threadKey}`)) {
+        logger.error('Lite worker crash loop detected, stopping respawn', { threadKey, maxCrashes: MAX_CRASHES, windowMs: CRASH_WINDOW_MS });
+        return;
+      }
+
       logger.error('Lite worker crashed unexpectedly', { threadKey });
 
       // Check persistence for pending inbound-lite messages and auto-respawn
@@ -107,6 +148,7 @@ async function main() {
               model: config.defaultModel,
               permissionMode: config.defaultPermissionMode,
               mcpServers: config.mcpServers,
+              anthropicApiKey: config.anthropicApiKey,
             };
             // Also spawn main worker if not running (lite worker needs it)
             if (!registry.has(threadKey)) {
@@ -131,13 +173,14 @@ async function main() {
   const streamRouter = new StreamRouter({
     createStream: async (channel, threadTs, userId, streamType) => {
       const teamId = await ipcGateway.resolveTeamId();
+      const effectiveUserId = userId || await ipcGateway.resolveBotUserId();
       const args: Record<string, unknown> = {
         channel,
         thread_ts: threadTs,
         task_display_mode: streamType === 'todo' ? 'plan' : 'timeline',
       };
       if (teamId) args.recipient_team_id = teamId;
-      if (userId) args.recipient_user_id = userId;
+      if (effectiveUserId) args.recipient_user_id = effectiveUserId;
 
       const streamer = (app.client as any).chatStream(args);
       // Must send a plan_update to force Slack to start the stream and return ts.
@@ -152,7 +195,10 @@ async function main() {
     logger,
   });
 
-  const restartHandler = new RestartHandler(app, workerManager, logger);
+  const restartHandler = new RestartHandler(app, workerManager, logger, (threadKey) => {
+    clearCrashHistory(threadKey);
+    clearCrashHistory(`lite:${threadKey}`);
+  });
 
   // Connect to persistence service
   let persistenceReady = false; // Gate to prevent onDisconnect from firing before initial connect
@@ -255,6 +301,19 @@ async function main() {
                 text: fallbackText,
               });
             }
+          } else if (postErr?.data?.error === 'invalid_blocks' || postErr.message?.includes('invalid_blocks')) {
+            // Markdown blocks rejected (HTML tags, nested fences, etc.) — upload as .md file
+            logger.warn('postMessage invalid_blocks, uploading as .md file', { length: fullText.length });
+            const preview = fullText.slice(0, 256).trimEnd() + '...\n\n_(full response attached as file — Slack rejected the message blocks)_';
+            await rateLimitedSlackCall(() =>
+              app.client.filesUploadV2({
+                channel_id: payload.channel as string,
+                thread_ts: payload.thread_ts as string,
+                filename: `response-${Date.now()}.md`,
+                content: fullText,
+                initial_comment: preview,
+              } as any),
+            );
           } else {
             throw postErr;
           }
@@ -307,6 +366,8 @@ async function main() {
         if (payload.file_path) {
           const { readFileSync } = await import('node:fs');
           args.file = readFileSync(payload.file_path as string);
+        } else if (payload.content) {
+          args.content = payload.content;
         }
         if (payload.initial_comment) args.initial_comment = payload.initial_comment;
         await rateLimitedSlackCall(() => app.client.filesUploadV2(args as any));
@@ -492,6 +553,7 @@ async function main() {
           model: config.defaultModel,
           permissionMode: config.defaultPermissionMode,
           mcpServers: config.mcpServers,
+          anthropicApiKey: config.anthropicApiKey,
         };
         workerManager.spawn(orphanThreadKey, workerConfig);
       }
@@ -511,6 +573,7 @@ async function main() {
           model: config.defaultModel,
           permissionMode: config.defaultPermissionMode,
           mcpServers: config.mcpServers,
+          anthropicApiKey: config.anthropicApiKey,
         };
         // Ensure main worker is also running (lite worker needs it as RPC target)
         if (!registry.get(orphanThreadKey)) {

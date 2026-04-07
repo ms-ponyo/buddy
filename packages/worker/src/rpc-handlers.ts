@@ -39,9 +39,10 @@ export function registerWorkerControlHandlers(
         mode: null,
         effort: null,
         budget: null,
-        fallbackModel: null,
+  
         agent: null,
         systemPromptAppend: null,
+        projectDir: null,
         isBackground: false,
         sessionId: null,
       };
@@ -53,9 +54,10 @@ export function registerWorkerControlHandlers(
       mode: ctx.configOverrides.getPermissionMode() ?? null,
       effort: ctx.configOverrides.getEffort() ?? null,
       budget: ctx.configOverrides.getBudget() ?? null,
-      fallbackModel: ctx.configOverrides.getFallbackModel() ?? null,
+
       agent: ctx.configOverrides.getAgent() ?? null,
       systemPromptAppend: ctx.configOverrides.getSystemPromptAppend() ?? null,
+      projectDir: ctx.configOverrides.getProjectDir() ?? null,
       isBackground: exec?.isBackground ?? false,
       sessionId: ctx.claudeSession.getSessionId() ?? null,
     };
@@ -109,6 +111,13 @@ export function registerWorkerControlHandlers(
   register('worker.switchEffort', (params) => {
     const { effort } = params as { effort: string };
     getCtx()?.configOverrides.setEffort(effort as any);
+    return { ok: true };
+  });
+
+  // worker.switchProject — override the project directory
+  register('worker.switchProject', (params) => {
+    const { dir } = params as { dir: string };
+    getCtx()?.configOverrides.setProjectDir(dir);
     return { ok: true };
   });
 

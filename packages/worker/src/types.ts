@@ -34,7 +34,6 @@ export interface BuddyConfig {
   mcpServers: Record<string, McpServerConfig>;
   enabledMcpServers: string[];
   plugins: Array<{ type: 'local'; path: string }>;
-  interactiveBridgePatterns: Array<{ base: string; hint?: string }>;
   socketPath: string;
   persistenceSocket: string;
   gatewaySocket: string;
@@ -174,6 +173,7 @@ export interface AskUserQuestionOption {
   label: string;
   description: string;
   markdown?: string;
+  preview?: string;
 }
 
 /** A single question item in an ask-user-question prompt. */

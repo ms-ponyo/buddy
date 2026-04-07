@@ -9,7 +9,7 @@ import type { ToolRisk } from '../types.js';
 export function classifyToolRisk(toolName: string, input: Record<string, unknown>): ToolRisk {
   if (toolName === 'Bash' && typeof input.command === 'string') {
     const cmd = input.command;
-    if (/\brm\s+-rf\b|--force\b|git\s+push\s+--force|git\s+reset\s+--hard|\bsudo\b/.test(cmd)) {
+    if (/\brm\s+-rf\b|--force\b|git\s+push\s+--force|git\s+reset\s+--hard|\bsudo\b|\bchown\b|\bchmod\s+[0-7]*7[0-7]*\b|\bmkfs\b|\bdd\b\s+|\bkill\s+-9\b|curl\b.*\|\s*(ba)?sh|wget\b.*\|\s*(ba)?sh/.test(cmd)) {
       return 'destructive';
     }
   }

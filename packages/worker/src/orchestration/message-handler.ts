@@ -6,13 +6,13 @@ import type { Logger } from '../logger.js';
 import type { BuddyConfig } from '../types.js';
 import type { PersistenceAdapter } from '../adapters/persistence-adapter.js';
 import type { SlackAdapter } from '../adapters/slack-adapter.js';
-
 // ── WorkerLoop interface ──────────────────────────────────────────────
 // The full WorkerLoop will be implemented separately; we depend on this minimal interface.
 
 export interface WorkerLoop {
   handleMessage(msg: QueueMessage, onResponsePosted?: () => Promise<void>): Promise<void>;
   interrupt(): void;
+  readonly shuttingDown: boolean;
 }
 
 // ── Constructor deps ──────────────────────────────────────────────────
@@ -79,6 +79,9 @@ export class MessageHandler {
     try {
       this.logger.debug('Routing to worker loop', { id: msg.id, threadKey: this.threadKey });
       await this.workerLoop.handleMessage(msg, ackOnce);
+      // If the worker is shutting down (health-kill), leave the message as 'delivered'
+      // so resetForThread can recover it for the replacement worker.
+      if (this.workerLoop.shuttingDown) return;
       // Ack here for cases where handleMessage returns without calling ackOnce
       // (e.g. if the worker loop bails early without posting a response).
       await ackOnce();

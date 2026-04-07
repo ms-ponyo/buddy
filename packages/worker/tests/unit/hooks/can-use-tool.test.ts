@@ -32,7 +32,6 @@ describe('createCanUseToolHook', () => {
       logger: logger as any,
       channel: 'C123',
       threadTs: '1111.2222',
-      previewMode: 'moderate',
     });
   });
 
@@ -68,29 +67,43 @@ describe('createCanUseToolHook', () => {
       expect(result.behavior).toBe('allow');
     });
 
-    it('classifies Read as info and auto-allows', async () => {
-      const result = await hook('Read', { file_path: '/tmp/test.txt' }, toolOpts('tool-3'));
-      expect(result.behavior).toBe('allow');
-      expect(permissions.hasPending).toBe(false);
-    });
-
-    it('classifies Grep as info and auto-allows', async () => {
-      const result = await hook('Grep', { pattern: 'foo' }, toolOpts('tool-4'));
+    it('requests permission for info tools (Claude Code handles auto-allow internally)', async () => {
+      const hookPromise = hook('Read', { file_path: '/tmp/x' }, toolOpts('tool-auto-1'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-auto-1', { approved: true });
+      const result = await hookPromise;
       expect(result.behavior).toBe('allow');
     });
 
-    it('classifies Glob as info and auto-allows', async () => {
-      const result = await hook('Glob', { pattern: '*.ts' }, toolOpts('tool-5'));
+    it('requests permission for Grep', async () => {
+      const hookPromise = hook('Grep', { pattern: 'foo' }, toolOpts('tool-4'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-4', { approved: true });
+      const result = await hookPromise;
       expect(result.behavior).toBe('allow');
     });
 
-    it('classifies WebFetch as info and auto-allows', async () => {
-      const result = await hook('WebFetch', { url: 'https://example.com' }, toolOpts('tool-6'));
+    it('requests permission for Glob', async () => {
+      const hookPromise = hook('Glob', { pattern: '*.ts' }, toolOpts('tool-5'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-5', { approved: true });
+      const result = await hookPromise;
       expect(result.behavior).toBe('allow');
     });
 
-    it('classifies WebSearch as info and auto-allows', async () => {
-      const result = await hook('WebSearch', { query: 'test' }, toolOpts('tool-7'));
+    it('requests permission for WebFetch', async () => {
+      const hookPromise = hook('WebFetch', { url: 'https://example.com' }, toolOpts('tool-6'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-6', { approved: true });
+      const result = await hookPromise;
+      expect(result.behavior).toBe('allow');
+    });
+
+    it('requests permission for WebSearch', async () => {
+      const hookPromise = hook('WebSearch', { query: 'test' }, toolOpts('tool-7'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-7', { approved: true });
+      const result = await hookPromise;
       expect(result.behavior).toBe('allow');
     });
 
@@ -189,10 +202,12 @@ describe('createCanUseToolHook', () => {
       expect((result as any).updatedPermissions).toEqual(updatedPermissions);
     });
 
-    it('auto-allows info tools without posting permission message', async () => {
-      const result = await hook('Read', { file_path: '/tmp/x' }, toolOpts('tool-auto-1'));
+    it('requests permission for info tools via permission manager', async () => {
+      const hookPromise = hook('Read', { file_path: '/tmp/x' }, toolOpts('tool-auto-1'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-auto-1', { approved: true });
+      const result = await hookPromise;
       expect(result.behavior).toBe('allow');
-      expect(slack.sendInteractivePrompt).not.toHaveBeenCalled();
     });
 
     it('filters out already-approved patterns from suggestions', async () => {
@@ -301,74 +316,69 @@ describe('createCanUseToolHook', () => {
   // ── ExitPlanMode passthrough ──────────────────────────────────
 
   describe('ExitPlanMode handling', () => {
-    it('auto-allows ExitPlanMode (review is handled by pre-tool-use hook)', async () => {
+    it('returns deny as a defensive fallback', async () => {
       const result = await hook('ExitPlanMode', {}, toolOpts('tool-exit-1'));
-      // ExitPlanMode is auto-allowed in canUseTool because the PreToolUse
-      // hook already handled the plan review
-      expect(result.behavior).toBe('allow');
+      expect(result.behavior).toBe('deny');
+      expect((result as any).message).toContain('Plan review was not completed');
     });
   });
 
-  // ── Permission mode: bypassPermissions ──────────────────────────
+  // ── Tool overrides enforcement ────────────────────────────────
 
-  describe('permission mode overrides', () => {
-    it('auto-allows all tools when permission mode is bypassPermissions', async () => {
-      configOverrides.setPermissionMode('bypassPermissions');
-      hook = createCanUseToolHook({
-        permissions,
-        configOverrides,
-        logger: logger as any,
-        channel: 'C123',
-        threadTs: '1111.2222',
-        previewMode: 'moderate',
-      });
-
-      const result = await hook('Bash', { command: 'rm -rf /' }, toolOpts('tool-bypass-1'));
-      expect(result.behavior).toBe('allow');
-      expect(permissions.hasPending).toBe(false);
+  describe('tool overrides enforcement', () => {
+    it('denies tools in the disallowedTools list', async () => {
+      configOverrides.setToolOverrides({ disallowedTools: ['Bash', 'Write'] });
+      const result = await hook('Bash', { command: 'ls' }, toolOpts('tool-deny-ovr-1'));
+      expect(result.behavior).toBe('deny');
+      expect((result as any).message).toContain('blocked by thread tool restrictions');
     });
 
-    it('auto-allows write tools when permission mode is acceptEdits', async () => {
-      configOverrides.setPermissionMode('acceptEdits');
-      hook = createCanUseToolHook({
-        permissions,
-        configOverrides,
-        logger: logger as any,
-        channel: 'C123',
-        threadTs: '1111.2222',
-        previewMode: 'moderate',
-      });
+    it('denies tools not in the allowedTools list', async () => {
+      configOverrides.setToolOverrides({ allowedTools: ['Read', 'Grep'] });
+      const result = await hook('Write', { file_path: '/tmp/x', content: 'y' }, toolOpts('tool-allow-ovr-1'));
+      expect(result.behavior).toBe('deny');
+      expect((result as any).message).toContain('not in the allowed tools list');
+    });
 
-      // Write tools should be auto-allowed
-      const writeResult = await hook('Write', { file_path: '/tmp/x', content: 'y' }, toolOpts('tool-ae-1'));
-      expect(writeResult.behavior).toBe('allow');
-
-      const editResult = await hook('Edit', { file_path: '/tmp/x' }, toolOpts('tool-ae-2'));
-      expect(editResult.behavior).toBe('allow');
-
-      // But destructive Bash still requires permission
-      const bashPromise = hook('Bash', { command: 'rm -rf /' }, toolOpts('tool-ae-3'));
+    it('allows tools that are in the allowedTools list', async () => {
+      configOverrides.setToolOverrides({ allowedTools: ['Read', 'Grep'] });
+      const hookPromise = hook('Read', { file_path: '/tmp/x' }, toolOpts('tool-allow-ovr-2'));
+      // Tool is allowed by overrides, so it proceeds to permission check
       expect(permissions.hasPending).toBe(true);
-      permissions.resolveInteraction('tool-ae-3', { approved: true });
-      await bashPromise;
+      permissions.resolveInteraction('tool-allow-ovr-2', { approved: true });
+      const result = await hookPromise;
+      expect(result.behavior).toBe('allow');
     });
 
-    it('auto-allows everything in plan mode', async () => {
-      configOverrides.setPermissionMode('plan');
-      hook = createCanUseToolHook({
-        permissions,
-        configOverrides,
-        logger: logger as any,
-        channel: 'C123',
-        threadTs: '1111.2222',
-        previewMode: 'moderate',
-      });
-
-      const result = await hook('Write', { file_path: '/tmp/plan.md', content: 'plan' }, toolOpts('tool-plan-1'));
+    it('allows tools when no overrides are set', async () => {
+      const hookPromise = hook('Bash', { command: 'ls' }, toolOpts('tool-no-ovr-1'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-no-ovr-1', { approved: true });
+      const result = await hookPromise;
       expect(result.behavior).toBe('allow');
-      expect(permissions.hasPending).toBe(false);
+    });
+
+    it('disallowedTools takes precedence over allowedTools', async () => {
+      configOverrides.setToolOverrides({ allowedTools: ['Bash'], disallowedTools: ['Bash'] });
+      const result = await hook('Bash', { command: 'ls' }, toolOpts('tool-both-ovr-1'));
+      expect(result.behavior).toBe('deny');
+      expect((result as any).message).toContain('blocked by thread tool restrictions');
+    });
+
+    it('respects overrides cleared at runtime', async () => {
+      configOverrides.setToolOverrides({ disallowedTools: ['Bash'] });
+      const result1 = await hook('Bash', { command: 'ls' }, toolOpts('tool-clr-1'));
+      expect(result1.behavior).toBe('deny');
+
+      configOverrides.deleteToolOverrides();
+      const hookPromise = hook('Bash', { command: 'ls' }, toolOpts('tool-clr-2'));
+      expect(permissions.hasPending).toBe(true);
+      permissions.resolveInteraction('tool-clr-2', { approved: true });
+      const result2 = await hookPromise;
+      expect(result2.behavior).toBe('allow');
     });
   });
+
 });
 
 // ── extractBashPattern ───────────────────────────────────────────
@@ -460,5 +470,33 @@ describe('extractBashPatterns', () => {
   it('returns empty array for empty input', () => {
     expect(extractBashPatterns('')).toEqual([]);
     expect(extractBashPatterns('   ')).toEqual([]);
+  });
+
+  it('does not split on pipe inside double-quoted grep regex', () => {
+    expect(extractBashPatterns('git log --all --oneline | grep -i "remove.*keyvault\\|keyvault.*remove"')).toEqual(['git log', 'grep']);
+  });
+
+  it('does not split on pipe inside single-quoted grep regex', () => {
+    expect(extractBashPatterns("git log --oneline | grep -i 'keyvault\\|secret'")).toEqual(['git log', 'grep']);
+  });
+
+  it('handles cd prefix with quoted pipe in grep', () => {
+    expect(extractBashPatterns('cd /Users/biliu/Workspace/aura && git log --all --oneline | grep -i "keyvault\\|secret"')).toEqual(['git log', 'grep']);
+  });
+
+  it('strips shell comment lines before extracting patterns', () => {
+    expect(extractBashPatterns('# Check if the function app has a managed identity\naz functionapp identity show --name func-gateway-adapter-dev --resource-group rg-aura-dev -o table 2>&1')).toEqual(['az']);
+  });
+
+  it('strips multiple comment lines', () => {
+    expect(extractBashPatterns('# Step 1: pull latest\n# Step 2: build\ngit pull && npm run build')).toEqual(['git pull', 'npm run']);
+  });
+
+  it('strips indented comment lines', () => {
+    expect(extractBashPatterns('  # a comment\nls -la')).toEqual(['ls']);
+  });
+
+  it('returns empty when command is only comments', () => {
+    expect(extractBashPatterns('# just a comment')).toEqual([]);
   });
 });

@@ -34,8 +34,25 @@ export interface StreamBufferOptions {
 
 const OVERFLOW_ERRORS = ['msg_too_long', 'not_in_streaming_state', 'message_not_found'];
 
+/** Timeout for streamer API calls (stop/append). Prevents a hung Slack API call
+ *  from blocking the outbound chain indefinitely. */
+const STREAMER_TIMEOUT_MS = 10_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Streamer call timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+}
+
 function isOverflowError(err: Error): boolean {
   return OVERFLOW_ERRORS.some((pattern) => err.message?.includes(pattern));
+}
+
+function isTimeoutError(err: Error): boolean {
+  return err.message?.includes('timed out after') ?? false;
 }
 
 // ── StreamBuffer ─────────────────────────────────────────────────────
@@ -161,7 +178,7 @@ export class StreamBuffer {
 
     try {
       await this.rateLimitAcquire();
-      const result = await this.streamer.append({ chunks: payload });
+      const result = await withTimeout(this.streamer.append({ chunks: payload }), STREAMER_TIMEOUT_MS);
 
       // ── Post-drain tracking ──────────────────────────────────
       this.byteCount += batchSize;
@@ -189,9 +206,12 @@ export class StreamBuffer {
     } catch (err: unknown) {
       const error = err instanceof Error ? err : new Error(String(err));
 
-      if (isOverflowError(error)) {
-        // Push failed batch back to pending
+      if (isOverflowError(error) || isTimeoutError(error)) {
+        // Push failed batch back to pending and get a fresh streamer
         this.pending.unshift(...batch);
+        if (isTimeoutError(error)) {
+          this.onError(error, `drain:${this.streamType}`);
+        }
         await this.transparentRestart();
         // Don't re-drain here — the chunks are back in pending for the next drain call
       } else {
@@ -232,18 +252,18 @@ export class StreamBuffer {
       }
       if (completionChunks.length > 0) {
         try {
-          await this.streamer.append({ chunks: completionChunks });
+          await withTimeout(this.streamer.append({ chunks: completionChunks }), STREAMER_TIMEOUT_MS);
         } catch {
-          // Best effort — old stream may already be dead
+          // Best effort — old stream may already be dead or timed out
         }
       }
     }
 
     // Stop old stream (best effort)
     try {
-      await this.streamer.stop({});
+      await withTimeout(this.streamer.stop({}), STREAMER_TIMEOUT_MS);
     } catch {
-      // Best effort
+      // Best effort — may time out if Slack streaming API hangs
     }
 
     // Delete old message if it was a todo stream or an empty main stream
@@ -363,16 +383,16 @@ export class StreamBuffer {
     }
     if (completionChunks.length > 0) {
       try {
-        await this.streamer.append({ chunks: completionChunks });
+        await withTimeout(this.streamer.append({ chunks: completionChunks }), STREAMER_TIMEOUT_MS);
       } catch {
-        // Best effort — stream may already be dead
+        // Best effort — stream may already be dead or timed out
       }
     }
 
     try {
-      await this.streamer.stop({});
+      await withTimeout(this.streamer.stop({}), STREAMER_TIMEOUT_MS);
     } catch {
-      // Best effort
+      // Best effort — may time out if Slack streaming API hangs
     }
   }
 }

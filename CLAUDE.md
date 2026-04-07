@@ -82,9 +82,10 @@ Required:
 - `PROJECT_DIR` - Absolute path for Claude to work in
 
 Key optional:
+- `ANTHROPIC_API_KEY` - API key (alternative to `claude login` OAuth)
 - `CLAUDE_MODEL` - Main worker model (default: `claude-opus-4-6`)
 - `DISPATCH_MODEL` - Lite worker model (default: `claude-haiku-4-5-20251001`)
-- `PERMISSION_MODE` - default, acceptEdits, bypassPermissions, dontAsk
+- `PERMISSION_MODE` - auto, default, acceptEdits, bypassPermissions, dontAsk
 - `ALLOWED_USER_IDS`, `ALLOWED_CHANNEL_IDS` - Access control
 
 Full list in `.env.example`.

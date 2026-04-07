@@ -88,20 +88,6 @@ function discoverPlugins(projectDir: string): BuddyConfig['plugins'] {
   return plugins;
 }
 
-function loadInteractiveBridgePatterns(): BuddyConfig['interactiveBridgePatterns'] {
-  const raw = process.env.INTERACTIVE_BRIDGE_PATTERNS;
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (p: unknown) => typeof p === 'object' && p !== null && typeof (p as { base?: unknown }).base === 'string',
-    ) as BuddyConfig['interactiveBridgePatterns'];
-  } catch {
-    return [];
-  }
-}
-
 /**
  * Parses a thread key of the form "CHANNEL:THREAD_TS" into its components.
  * Throws if the format is invalid.
@@ -126,9 +112,9 @@ export function loadConfig(): BuddyConfig {
     slackBotToken: process.env.SLACK_BOT_TOKEN ?? '',
     slackUserToken: process.env.SLACK_USER_TOKEN || undefined,
     projectDir,
-    claudeModel: process.env.CLAUDE_MODEL ?? 'claude-opus-4-6',
-    dispatchModel: process.env.DISPATCH_MODEL ?? process.env.HAIKU_MODEL ?? 'claude-haiku-4-5-20251001',
-    permissionMode: process.env.PERMISSION_MODE ?? 'default',
+    claudeModel: process.env.CLAUDE_MODEL ?? 'opus[1m]',
+    dispatchModel: process.env.DISPATCH_MODEL ?? process.env.HAIKU_MODEL ?? 'haiku',
+    permissionMode: process.env.PERMISSION_MODE ?? 'auto',
     permissionDestination: process.env.PERMISSION_DESTINATION ?? 'projectSettings',
     logLevel: process.env.LOG_LEVEL ?? 'debug',
     logFile: process.env.LOG_FILE ?? `logs/bot-${localTimestamp()}.log`,
@@ -141,7 +127,6 @@ export function loadConfig(): BuddyConfig {
     mcpServers: loadMcpServers(),
     enabledMcpServers: parseCommaSeparated(process.env.MCP_SERVERS),
     plugins: discoverPlugins(projectDir),
-    interactiveBridgePatterns: loadInteractiveBridgePatterns(),
     socketPath: workerSocketPath(threadKey),
     persistenceSocket: PERSISTENCE_SOCKET,
     gatewaySocket: GATEWAY_SOCKET,

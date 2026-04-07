@@ -151,6 +151,49 @@ describe('QueueService', () => {
     expect(row2.retry_count).toBe(1);
   });
 
+  it('resetForQueue resets all delivered messages in the queue across all threads', () => {
+    // Simulate outbound messages across multiple threads (gateway wildcard subscription)
+    const { id: id1 } = queue.enqueue('outbound', 'C1:T1', { text: 'msg1' });
+    const { id: id2 } = queue.enqueue('outbound', 'C2:T2', { text: 'msg2' });
+    const { id: id3 } = queue.enqueue('inbound', 'C1:T1', { text: 'inbound-msg' });
+    queue.markDelivered(id1);
+    queue.markDelivered(id2);
+    queue.markDelivered(id3);
+
+    // Reset only the outbound queue
+    queue.resetForQueue('outbound');
+
+    const row1 = db.prepare('SELECT status, retry_count FROM queue_messages WHERE id = ?').get(id1) as any;
+    const row2 = db.prepare('SELECT status, retry_count FROM queue_messages WHERE id = ?').get(id2) as any;
+    const row3 = db.prepare('SELECT status, retry_count FROM queue_messages WHERE id = ?').get(id3) as any;
+
+    // Outbound messages reset to pending
+    expect(row1.status).toBe('pending');
+    expect(row1.retry_count).toBe(1);
+    expect(row2.status).toBe('pending');
+    expect(row2.retry_count).toBe(1);
+
+    // Inbound message untouched
+    expect(row3.status).toBe('delivered');
+  });
+
+  it('resetForQueue deadletters messages that exceed MAX_RETRIES', () => {
+    const { id } = queue.enqueue('outbound', 'C1:T1', { text: 'flaky' });
+
+    // Exhaust retries: nack twice, then deliver again
+    queue.markDelivered(id);
+    queue.nack('outbound', id);
+    queue.markDelivered(id);
+    queue.nack('outbound', id);
+    queue.markDelivered(id); // retryCount=2, status=delivered
+
+    queue.resetForQueue('outbound');
+
+    const row = db.prepare('SELECT status, retry_count FROM queue_messages WHERE id = ?').get(id) as any;
+    expect(row.status).toBe('deadlettered');
+    expect(row.retry_count).toBe(3);
+  });
+
   it('prune removes completed/deadlettered messages older than PRUNE_AGE', () => {
     const { id: id1 } = queue.enqueue('inbound', 'C123:T456', { text: 'old' });
     const { id: id2 } = queue.enqueue('inbound', 'C123:T456', { text: 'recent' });

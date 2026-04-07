@@ -26,8 +26,8 @@ function makeConfig(overrides: Partial<BuddyConfig> = {}): BuddyConfig {
     triggerEmoji: 'eyes',
     projectMappingsFile: '',
     mcpServers: {},
+    enabledMcpServers: [],
     plugins: [],
-    interactiveBridgePatterns: [],
     socketPath: '/tmp/test.sock',
     persistenceSocket: '/tmp/persistence.sock',
     gatewaySocket: '/tmp/gateway.sock',
@@ -98,13 +98,6 @@ interface MockServices {
     resolveInteraction: jest.Mock;
     staleCount: jest.Mock;
   };
-  bridge: {
-    hasPending: boolean;
-    isInteractiveCommand: jest.Mock;
-    startSession: jest.Mock;
-    resolveInteraction: jest.Mock;
-    cleanup: jest.Mock;
-  };
   configOverrides: {
     resolveConfig: jest.Mock;
     getModel: jest.Mock;
@@ -159,13 +152,6 @@ function createMockServices(overrides: Partial<{ config: Partial<BuddyConfig> }>
       resolveInteraction: jest.fn(() => false),
       staleCount: jest.fn(() => 0),
     },
-    bridge: {
-      hasPending: false,
-      isInteractiveCommand: jest.fn(() => false),
-      startSession: jest.fn(),
-      resolveInteraction: jest.fn(() => false),
-      cleanup: jest.fn(),
-    },
     configOverrides: {
       resolveConfig: jest.fn((base: BuddyConfig) => base),
       getModel: jest.fn(() => undefined),
@@ -195,7 +181,6 @@ function createWorkerLoop(services: MockServices): WorkerLoop {
     claudeSession: services.claudeSession as any,
     progress: services.progress as any,
     permissions: services.permissions as any,
-    bridge: services.bridge as any,
     configOverrides: services.configOverrides as any,
     mcpRegistry: services.mcpRegistry as any,
     logger: services.logger as any,
@@ -597,17 +582,10 @@ describe('WorkerLoop', () => {
       expect(loopWithPending.awaitingUserInput).toBe(true);
     });
 
-    it('returns true when interactive bridge has pending', () => {
-      (services.bridge as any).hasPending = true;
-      const loopWithPending = createWorkerLoop(services);
-      expect(loopWithPending.awaitingUserInput).toBe(true);
-    });
-
-    it('returns true when both have pending', () => {
-      (services.permissions as any).hasPending = true;
-      (services.bridge as any).hasPending = true;
-      const loopWithPending = createWorkerLoop(services);
-      expect(loopWithPending.awaitingUserInput).toBe(true);
+    it('returns false when permissions has no pending', () => {
+      (services.permissions as any).hasPending = false;
+      const loopNoPending = createWorkerLoop(services);
+      expect(loopNoPending.awaitingUserInput).toBe(false);
     });
   });
 

@@ -16,9 +16,9 @@ interface StatusSnapshot {
   mode: string;
   effort: string;
   budget: number | null;
-  fallbackModel: string | null;
   agent: string | null;
   systemPromptAppend: string | null;
+  projectDir: string | null;
   isBackground: boolean;
   hasActiveExecution: boolean;
   sessionId: string | null;
@@ -29,9 +29,9 @@ const FALLBACK_SNAPSHOT: StatusSnapshot = {
   mode: 'unknown',
   effort: 'unknown',
   budget: null,
-  fallbackModel: null,
   agent: null,
   systemPromptAppend: null,
+  projectDir: null,
   isBackground: false,
   hasActiveExecution: false,
   sessionId: null,
@@ -124,16 +124,21 @@ export class RemoteConfigOverrides {
     this.invalidateCache();
   }
 
-  // ── Fallback Model ──────────────────────────────────────────────
-
-  getFallbackModel(): string | undefined {
-    return this.getSnapshot().fallbackModel ?? undefined;
-  }
-
   // ── Agent ──────────────────────────────────────────────────────
 
   getAgent(): string | undefined {
     return this.getSnapshot().agent ?? undefined;
+  }
+
+  // ── Project Dir ──────────────────────────────────────────────
+
+  getProjectDir(): string | undefined {
+    return this.getSnapshot().projectDir ?? undefined;
+  }
+
+  async setProjectDir(dir: string): Promise<void> {
+    await this.rpc.call('worker.switchProject', { dir });
+    this.invalidateCache();
   }
 
   // ── System Prompt Append ───────────────────────────────────────

@@ -132,7 +132,7 @@ describe('Stream pipeline — persistence queue to StreamRouter', () => {
     await processOutboundMessage(fakeSlack, router, delivered[0]);
     await client.call('queue.ack', { queue: 'outbound', id: delivered[0].id });
 
-    // stream_start eagerly creates the 'main' buffer (rotation timer starts immediately)
+    // Eagerly creates 'main' buffer on stream_start (rotation timer starts immediately)
     expect(fakeSlack.getCalls('chatStream')).toHaveLength(1);
 
     // Enqueue stream_chunk for 'main'

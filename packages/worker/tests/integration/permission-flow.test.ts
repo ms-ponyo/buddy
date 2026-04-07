@@ -12,10 +12,12 @@ describe('Permission flow integration', () => {
   let ctx: WorkerContext;
 
   beforeEach(() => {
+    jest.useFakeTimers();
     ctx = mockWorkerContext();
   });
 
   afterEach(() => {
+    jest.useRealTimers();
     jest.restoreAllMocks();
   });
 
@@ -37,6 +39,9 @@ describe('Permission flow integration', () => {
 
       // Verify that permission is pending
       expect(ctx.permissions.hasPending).toBe(true);
+
+      // Advance past batch debounce (200ms)
+      jest.advanceTimersByTime(300);
 
       // Verify interactive prompt was sent to Slack
       const prompts = (ctx.slack as any).interactivePrompts;
@@ -70,6 +75,9 @@ describe('Permission flow integration', () => {
         suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'rm:*' }], behavior: 'allow', destination: 'session' }],
       });
 
+      // Advance past batch debounce
+      jest.advanceTimersByTime(300);
+
       // Simulate denial
       const resolved = ctx.permissions.resolveInteraction('perm-deny-456', {
         approved: false,
@@ -94,6 +102,9 @@ describe('Permission flow integration', () => {
         suggestions: undefined,
       });
 
+      // Advance past batch debounce
+      jest.advanceTimersByTime(300);
+
       // Try to resolve with wrong callback ID
       const resolved = ctx.permissions.resolveInteraction('perm-wrong', {
         approved: true,
@@ -108,7 +119,7 @@ describe('Permission flow integration', () => {
       await permissionPromise;
     });
 
-    it('supersedes previous permission when new one is requested', async () => {
+    it('batches concurrent permission requests', async () => {
       // First permission request
       const firstPromise = ctx.permissions.requestPermission({
         toolName: 'Bash',
@@ -121,7 +132,7 @@ describe('Permission flow integration', () => {
         suggestions: undefined,
       });
 
-      // Second permission supersedes the first
+      // Second permission within debounce window
       const secondPromise = ctx.permissions.requestPermission({
         toolName: 'Bash',
         toolInput: { command: 'echo 2' },
@@ -133,16 +144,24 @@ describe('Permission flow integration', () => {
         suggestions: undefined,
       });
 
-      // First promise should reject
-      await expect(firstPromise).rejects.toThrow('Superseded by new permission request');
+      // Advance past batch debounce
+      jest.advanceTimersByTime(300);
 
-      // Only the second should be pending
+      // Both should be pending
       expect(ctx.permissions.hasPending).toBe(true);
 
-      // Resolve the second
-      ctx.permissions.resolveInteraction('perm-second', { approved: true } as PermissionResult);
-      const result = await secondPromise;
-      expect(result.approved).toBe(true);
+      // The prompts should have been posted as a batch
+      const prompts = (ctx.slack as any).interactivePrompts;
+      expect(prompts.length).toBeGreaterThanOrEqual(1);
+
+      // Resolve the batch — find the batch callbackId
+      const batchCallbackId = prompts[prompts.length - 1].callbackId;
+      ctx.permissions.resolveInteraction(batchCallbackId, { approved: true } as PermissionResult);
+
+      const result1 = await firstPromise;
+      const result2 = await secondPromise;
+      expect(result1.approved).toBe(true);
+      expect(result2.approved).toBe(true);
     });
   });
 
@@ -152,8 +171,6 @@ describe('Permission flow integration', () => {
     it('posts question blocks and resolves with user answer', async () => {
       const questionPromise = ctx.permissions.askUserQuestion({
         callbackId: 'q-123',
-        channel: 'C_TEST',
-        threadTs: '1700000000.000000',
         questions: [
           {
             question: 'Which framework do you prefer?',
@@ -201,8 +218,6 @@ describe('Permission flow integration', () => {
 
       const qPromise = ctx.permissions.askUserQuestion({
         callbackId: 'q-clear',
-        channel: 'C_TEST',
-        threadTs: '1700000000.000000',
         questions: [
           {
             question: 'Choose one',
@@ -237,10 +252,14 @@ describe('Permission flow integration', () => {
 
   describe('staleCount()', () => {
     it('returns 0 when no pending items', () => {
+      jest.useRealTimers();
       expect(ctx.permissions.staleCount(1000)).toBe(0);
+      jest.useFakeTimers();
     });
 
     it('returns count of pending items older than threshold', async () => {
+      jest.useRealTimers();
+
       // Create a pending permission
       const permPromise = ctx.permissions.requestPermission({
         toolName: 'Bash',
@@ -267,6 +286,7 @@ describe('Permission flow integration', () => {
 
       // Clean up
       ctx.permissions.clearAll();
+      jest.useFakeTimers();
     });
   });
 });

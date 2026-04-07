@@ -1,46 +1,13 @@
-// src/services/bot-command-router.ts — Lean command router.
-// Parses "!command args" messages, routes to registered handlers.
-// Individual handler logic lives in bot-command-handlers.ts.
+// src/services/bot-command-router.ts — Metadata-driven command router.
+// Parses "!command args" messages, routes to handlers based on CommandDefinition metadata.
+// All behavior (no-arg dispatch, aliases, SDK forwarding) is derived from definitions.
 
 import type { Logger } from '../logger.js';
 import type { ParsedCommand, BuddyConfig, ActiveExecution } from '../types.js';
 import type { ConfigOverrides } from './config-overrides.js';
-import type { InitInfo, AccountInfo } from './claude-session.js';
-import {
-  handleModel,
-  handleMode,
-  handleEffort,
-  handleBudget,
-  handleClear,
-  handleStatus,
-  handleHelp,
-  handleInterrupt,
-  handleCost,
-  handleUsage,
-  handleCompact,
-  handleBg,
-  handleVersion,
-  handleDoctor,
-  handleAgents,
-  handleFallback,
-  handleAgent,
-  handleSystem,
-  handleTools,
-  handleWorktree,
-  handlePr,
-  handleLog,
-  handleRestart,
-  type CommandHandler,
-  type CommandHandlerResult,
-  type CommandContext,
-} from './bot-command-handlers.js';
-
-// ── No-arg commands: if args are present, dispatch to LLM ────────
-
-const NO_ARG_COMMANDS = new Set([
-  'compact', 'cost', 'usage', 'interrupt', 'stop', 'bg',
-  'status', 'help', 'restart', 'version', 'doctor', 'agents', 'log',
-]);
+import type { InitInfo, AccountInfo, SDKSlashCommand } from './claude-session.js';
+import type { CommandDefinition, CommandContext, CommandHandlerResult } from '../commands/types.js';
+import { formatCatalogForLLM } from '../commands/index.js';
 
 // ── Constructor deps ─────────────────────────────────────────────
 
@@ -58,75 +25,41 @@ export interface BotCommandRouterDeps {
   getAccountInfo?: () => AccountInfo | null;
   /** Getter for session cost from persistence */
   getSessionCost?: () => Promise<number>;
+  /** Callback to interrupt the current execution */
+  onInterrupt?: () => void | Promise<void>;
+  /** Sync permission mode to the SDK session when changed via bot commands. */
+  onPermissionModeChange?: (mode: string) => void;
+  /** Getter for supported SDK commands/skills from the active query. */
+  getSupportedCommands?: () => Promise<SDKSlashCommand[] | null>;
 }
 
 // ── BotCommandRouter ─────────────────────────────────────────────
 
 export class BotCommandRouter {
   private readonly logger: Logger;
-  private readonly configOverrides: ConfigOverrides;
-  private readonly config: BuddyConfig;
-  private readonly getCurrentExecution?: () => ActiveExecution | null;
-  private readonly logFile?: string;
-  private readonly getInitInfo?: () => InitInfo | null;
-  private readonly getAccountInfo?: () => AccountInfo | null;
-  private readonly getSessionCost?: () => Promise<number>;
-  private readonly commands = new Map<string, CommandHandler>();
+  private readonly deps: BotCommandRouterDeps;
+  private readonly commands = new Map<string, CommandDefinition>();
+  private readonly definitions: CommandDefinition[];
 
-  constructor(deps: BotCommandRouterDeps) {
+  constructor(deps: BotCommandRouterDeps, definitions: CommandDefinition[]) {
     this.logger = deps.logger;
-    this.configOverrides = deps.configOverrides;
-    this.config = deps.config;
-    this.getCurrentExecution = deps.getCurrentExecution;
-    this.logFile = deps.logFile;
-    this.getInitInfo = deps.getInitInfo;
-    this.getAccountInfo = deps.getAccountInfo;
-    this.getSessionCost = deps.getSessionCost;
+    this.deps = deps;
+    this.definitions = definitions;
 
-    // Register built-in handlers
-    this.commands.set('model', handleModel);
-    this.commands.set('mode', handleMode);
-    this.commands.set('effort', handleEffort);
-    this.commands.set('budget', handleBudget);
-    this.commands.set('clear', handleClear);
-    this.commands.set('status', handleStatus);
-    this.commands.set('help', handleHelp);
-    this.commands.set('interrupt', handleInterrupt);
-    this.commands.set('stop', handleInterrupt);
-    this.commands.set('cost', handleCost);
-    this.commands.set('usage', handleUsage);
-    this.commands.set('compact', handleCompact);
-    this.commands.set('bg', handleBg);
-    this.commands.set('version', handleVersion);
-    this.commands.set('doctor', handleDoctor);
-    this.commands.set('agents', handleAgents);
-    this.commands.set('fallback', handleFallback);
-    this.commands.set('agent', handleAgent);
-    this.commands.set('system', handleSystem);
-    this.commands.set('tools', handleTools);
-    this.commands.set('worktree', handleWorktree);
-    this.commands.set('pr', handlePr);
-    this.commands.set('log', handleLog);
-    this.commands.set('restart', handleRestart);
+    for (const def of definitions) {
+      this.commands.set(def.name, def);
+      for (const alias of def.aliases ?? []) {
+        this.commands.set(alias, def);
+      }
+    }
   }
 
-  // ── parse ───────────────────────────────────────────────────────
-
-  /**
-   * Parse text into a command + args if it starts with `!`.
-   * Returns undefined if not a command.
-   */
   parse(text: string): ParsedCommand | undefined {
     const match = text.match(/^!(\S+)\s*(.*)/s);
     if (!match) return undefined;
     return { command: match[1].toLowerCase(), args: match[2].trim() };
   }
 
-  // ── rewriteSlashCommand ─────────────────────────────────────────
-
-  /**
-   * Convert `!slash-command args` to `/slash-command args` for the SDK.
-   */
   rewriteSlashCommand(text: string): string {
     if (/^!\S/.test(text)) {
       return '/' + text.slice(1);
@@ -134,35 +67,44 @@ export class BotCommandRouter {
     return text;
   }
 
-  // ── hasCommand ──────────────────────────────────────────────────
-
-  /**
-   * Check if a command is registered in the router.
-   */
   hasCommand(name: string): boolean {
     return this.commands.has(name);
   }
 
-  // ── registerCommand ─────────────────────────────────────────────
-
-  /**
-   * Register a custom command handler.
-   */
-  registerCommand(name: string, handler: CommandHandler): void {
-    this.commands.set(name, handler);
+  isSDKSlashCommand(name: string): boolean {
+    const def = this.commands.get(name);
+    return def?.sdkSlashCommand === true;
   }
 
-  // ── execute ─────────────────────────────────────────────────────
+  getCatalog(): CommandDefinition[] {
+    return this.definitions;
+  }
 
-  /**
-   * Execute a parsed command. Returns a result indicating whether
-   * the command was handled locally or should be dispatched to the LLM.
-   */
+  getFormattedCatalog(): string {
+    return formatCatalogForLLM(this.definitions);
+  }
+
   async execute(parsed: ParsedCommand): Promise<CommandHandlerResult> {
     this.logger.info('Bot command', { command: parsed.command, args: parsed.args || undefined });
 
+    const def = this.commands.get(parsed.command);
+    if (!def) {
+      return {
+        type: 'dispatch',
+        reply: `Unknown command "!${parsed.command}". Dispatching to assistant.`,
+      };
+    }
+
+    // SDK commands should not reach execute() — they are forwarded before this point
+    if (def.sdkSlashCommand) {
+      return {
+        type: 'dispatch',
+        reply: `!${parsed.command} is an SDK command. Forwarding to SDK session.`,
+      };
+    }
+
     // No-arg commands with unexpected args → dispatch to LLM
-    if (NO_ARG_COMMANDS.has(parsed.command) && parsed.args) {
+    if (def.noArgBehavior === 'dispatch' && parsed.args) {
       this.logger.info('No-arg command has args, dispatching', {
         command: parsed.command,
         args: parsed.args,
@@ -173,26 +115,21 @@ export class BotCommandRouter {
       };
     }
 
-    const handler = this.commands.get(parsed.command);
-    if (!handler) {
-      return {
-        type: 'dispatch',
-        reply: `Unknown command "!${parsed.command}". Dispatching to assistant.`,
-      };
-    }
-
-    const sessionCost = await this.getSessionCost?.() ?? 0;
+    const sessionCost = await this.deps.getSessionCost?.() ?? 0;
 
     const ctx: CommandContext = {
-      config: this.config,
-      configOverrides: this.configOverrides,
-      currentExecution: this.getCurrentExecution?.() ?? null,
-      logFile: this.logFile,
-      initInfo: this.getInitInfo?.() ?? null,
-      accountInfo: this.getAccountInfo?.() ?? null,
+      config: this.deps.config,
+      configOverrides: this.deps.configOverrides,
+      currentExecution: this.deps.getCurrentExecution?.() ?? null,
+      logFile: this.deps.logFile,
+      initInfo: this.deps.getInitInfo?.() ?? null,
+      accountInfo: this.deps.getAccountInfo?.() ?? null,
       sessionCost,
+      onInterrupt: this.deps.onInterrupt,
+      onPermissionModeChange: this.deps.onPermissionModeChange,
+      getSupportedCommands: this.deps.getSupportedCommands,
     };
 
-    return handler(parsed.args, ctx);
+    return def.handler(parsed.args, ctx);
   }
 }

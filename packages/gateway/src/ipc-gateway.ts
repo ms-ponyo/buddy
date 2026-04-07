@@ -18,6 +18,9 @@ export class IpcGateway {
   /** Cached team ID from auth.test — used as fallback for stream recipient_team_id */
   private cachedTeamId: string | undefined;
 
+  /** Cached bot user ID from auth.test — used as fallback for stream recipient_user_id */
+  private cachedBotUserId: string | undefined;
+
   /** Separate WebClient using user token (xoxp-) for search API */
   private userClient: WebClient | undefined;
 
@@ -92,6 +95,13 @@ export class IpcGateway {
       return {};
     });
 
+    this.server.registerMethod('worker.setState', async (params) => {
+      const { threadKey, state, type } = params as { threadKey: string; state: string; type?: string };
+      const sessionType = (type === 'lite' ? 'lite' : 'worker') as import('./session-registry.js').SessionType;
+      this.registry.setState(threadKey, state as any, sessionType);
+      return {};
+    });
+
     this.server.registerMethod('worker.deregister', async (params) => {
       const { threadKey, pid } = params as { threadKey: string; pid?: number };
       const current = this.registry.get(threadKey);
@@ -110,14 +120,28 @@ export class IpcGateway {
   /** Resolve team ID via auth.test and cache it */
   async resolveTeamId(): Promise<string | undefined> {
     if (this.cachedTeamId) return this.cachedTeamId;
+    await this.resolveAuthInfo();
+    return this.cachedTeamId;
+  }
+
+  /** Resolve bot user ID via auth.test and cache it */
+  async resolveBotUserId(): Promise<string | undefined> {
+    if (this.cachedBotUserId) return this.cachedBotUserId;
+    await this.resolveAuthInfo();
+    return this.cachedBotUserId;
+  }
+
+  /** Shared auth.test call that caches both team ID and bot user ID */
+  private async resolveAuthInfo(): Promise<void> {
+    if (this.cachedTeamId && this.cachedBotUserId) return;
     try {
       const result = await this.app.client.auth.test();
       this.cachedTeamId = result.team_id;
-      this.logger.info('Resolved team ID', { teamId: this.cachedTeamId });
+      this.cachedBotUserId = result.user_id;
+      this.logger.info('Resolved auth info', { teamId: this.cachedTeamId, botUserId: this.cachedBotUserId });
     } catch (err: any) {
-      this.logger.warn('Failed to resolve team ID via auth.test', { error: err.message });
+      this.logger.warn('Failed to resolve auth info via auth.test', { error: err.message });
     }
-    return this.cachedTeamId;
   }
 
   /** Start the RPC server */
@@ -140,7 +164,7 @@ export class IpcGateway {
 export async function postInteractivePromptToSlack(
   app: App,
   threadKey: string,
-  promptType: 'permission' | 'question' | 'terminal',
+  promptType: 'permission' | 'question' | 'terminal' | 'planReview',
   display: PromptDisplay,
   callbackId: string,
   logger: Logger,
@@ -213,59 +237,112 @@ export async function postInteractivePromptToSlack(
         });
       }
     } else if (promptType === 'question') {
-      const blocks: any[] = [];
-      const questions = display.questions as { header: string; question: string; options: { label: string; value: string }[] }[] | undefined;
+      const questions = display.questions as { header: string; question: string; options: { label: string; value: string; description?: string; preview?: string }[]; multiSelect?: boolean }[] | undefined;
 
       if (questions && questions.length > 0) {
-        let flatIdx = 0;
-        for (let qi = 0; qi < questions.length; qi++) {
-          const q = questions[qi];
-          blocks.push({
-            type: 'section',
-            text: { type: 'mrkdwn', text: `*${q.header}*\n${q.question}` },
-          });
+        // Post only the first question (one at a time, not all in a single message)
+        const q = questions[0];
+        const blocks: any[] = [];
 
-          const buttons = q.options.map((opt) => ({
-            type: 'button',
-            text: { type: 'plain_text', text: opt.label.slice(0, 75) },
-            action_id: `${callbackId}_${flatIdx++}`,
-            value: `${callbackId}:${qi}:${opt.value}`,
-          }));
-          blocks.push({ type: 'actions', elements: buttons });
+        blocks.push({
+          type: 'section',
+          text: { type: 'mrkdwn', text: `*${q.header}*\n${q.question}` },
+        });
 
-          blocks.push({
-            type: 'input',
-            dispatch_action: true,
-            block_id: `question_input_${callbackId}_${qi}`,
-            element: {
-              type: 'plain_text_input',
-              action_id: `${callbackId}_input_${qi}`,
-              placeholder: { type: 'plain_text', text: 'Or type your answer and press Enter\u2026' },
-              dispatch_action_config: { trigger_actions_on: ['on_enter_pressed'] },
+        // Radio buttons (or checkboxes if multiSelect) for options
+        const slackOptions = q.options.map((opt) => {
+          const option: any = {
+            text: { type: 'plain_text', text: opt.label },
+            value: `${callbackId}:0:${opt.value}`,
+          };
+          if (opt.description) {
+            option.description = { type: 'plain_text', text: opt.description };
+          }
+          return option;
+        });
+        const elementType = q.multiSelect ? 'checkboxes' : 'radio_buttons';
+        blocks.push({
+          type: 'actions',
+          elements: [
+            {
+              type: elementType,
+              action_id: `${callbackId}_0`,
+              options: slackOptions,
             },
-            label: { type: 'plain_text', text: ' ' },
-            optional: true,
-          });
+          ],
+        });
+
+        // Option previews (code snippets, mockups) as markdown blocks
+        const previews = q.options.filter((opt) => opt.preview);
+        if (previews.length > 0) {
+          blocks.push({ type: 'divider' });
+          for (const opt of previews) {
+            blocks.push({
+              type: 'markdown',
+              text: `**${opt.label}**\n${opt.preview}`,
+            });
+          }
         }
+
+        // Text input for custom answers
+        blocks.push({
+          type: 'input',
+          dispatch_action: true,
+          block_id: `question_input_${callbackId}_0`,
+          element: {
+            type: 'plain_text_input',
+            action_id: `${callbackId}_input_0`,
+            placeholder: { type: 'plain_text', text: 'Or type your answer and press Enter\u2026' },
+            dispatch_action_config: { trigger_actions_on: ['on_enter_pressed'] },
+          },
+          label: { type: 'plain_text', text: ' ' },
+          optional: true,
+        });
+
+        await app.client.chat.postMessage({ channel, thread_ts: threadTs, text: 'Claude has a question for you', blocks });
       } else {
         // Fallback: simple title/options format
+        const blocks: any[] = [];
         blocks.push({
           type: 'section',
           text: { type: 'mrkdwn', text: display.title || display.description || 'Question from Claude:' },
         });
         if (display.options && display.options.length > 0) {
+          const radioOptions = display.options.map((opt: any) => ({
+            text: { type: 'plain_text', text: opt.label },
+            value: opt.value,
+          }));
           blocks.push({
             type: 'actions',
-            elements: display.options.map((opt: any, i: number) => ({
-              type: 'button',
-              text: { type: 'plain_text', text: opt.label },
-              action_id: `${callbackId}_${i}`,
-              value: opt.value,
-            })),
+            elements: [
+              {
+                type: 'radio_buttons',
+                action_id: `${callbackId}_0`,
+                options: radioOptions,
+              },
+            ],
           });
         }
+        await app.client.chat.postMessage({ channel, thread_ts: threadTs, text: 'Claude has a question for you', blocks });
       }
-      await app.client.chat.postMessage({ channel, thread_ts: threadTs, text: 'Claude has a question for you', blocks });
+    } else if (promptType === 'planReview') {
+      if (display.planSplitMessages && display.planSplitMessages.length > 0) {
+        for (const msgBlocks of display.planSplitMessages) {
+          await app.client.chat.postMessage({
+            channel,
+            thread_ts: threadTs,
+            text: 'Plan for review',
+            blocks: msgBlocks as any[],
+          });
+        }
+      } else if (display.planBlocks) {
+        await app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: 'Plan for review',
+          blocks: display.planBlocks as any[],
+        });
+      }
     } else if (promptType === 'terminal') {
       await app.client.chat.postMessage({
         channel,

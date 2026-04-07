@@ -119,10 +119,9 @@ export const Button = ({ label, onClick }: Props) => {
     expect(text).toContain('`src/server.ts` L42');
     expect(text).toContain('-app.listen(3000);');
     expect(text).toContain('+app.listen(8080);');
-    // No file-level unified diff headers (--- / +++ lines)
+    // No unified diff file headers (hunk headers @@ are included)
     expect(text).not.toContain('---');
     expect(text).not.toContain('+++');
-    // Hunk headers (@@ lines) are included as part of the diff format
     expect(text).toContain('@@');
   });
 });

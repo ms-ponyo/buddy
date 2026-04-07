@@ -15,6 +15,7 @@ import { ClaudeSessionService } from './services/claude-session.js';
 import { BotCommandRouter } from './services/bot-command-router.js';
 import { DispatchHandler } from './handlers/dispatch-handler.js';
 import { LiteMessageHandler } from './lite-message-handler.js';
+import { allCommands } from './commands/index.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 /** Monorepo root — three levels up from packages/worker/src/ (or dist/) */
@@ -78,17 +79,30 @@ export function createLiteWorkerContext(
 
   const claudeSession = new ClaudeSessionService({ logger, queryFn: query as any });
 
-  const botCommandRouter = new BotCommandRouter({
-    configOverrides: remoteConfig as any,  // RemoteConfigOverrides is duck-type compatible
-    logger,
-    config,
-    // Lite worker does not have direct access to main worker execution — use RPC for status
-    getCurrentExecution: () => null,
-    logFile,
-    getInitInfo: () => claudeSession.getInitInfo(),
-    getAccountInfo: () => claudeSession.getAccountInfo(),
-    getSessionCost: () => persistence.getCost(channel, threadTs),
-  });
+  const botCommandRouter = new BotCommandRouter(
+    {
+      configOverrides: remoteConfig as any,  // RemoteConfigOverrides is duck-type compatible
+      logger,
+      config,
+      // Lite worker does not have direct access to main worker execution — use RPC for status
+      getCurrentExecution: () => null,
+      logFile,
+      getInitInfo: () => claudeSession.getInitInfo(),
+      getAccountInfo: () => claudeSession.getAccountInfo(),
+      getSessionCost: () => persistence.getCost(channel, threadTs),
+      onInterrupt: async () => { await mainWorkerRpc.call('worker.interrupt'); },
+      onPermissionModeChange: (mode) => { claudeSession.setPermissionMode(mode); },
+      getSupportedCommands: async () => {
+        try {
+          const result = await mainWorkerRpc.call('worker.getSupportedCommands') as { commands: { name: string; description: string; argumentHint: string }[] | null };
+          return result.commands;
+        } catch {
+          return null;
+        }
+      },
+    },
+    allCommands,
+  );
 
   // ── Handlers ───────────────────────────────────────────────────
 
@@ -101,6 +115,7 @@ export function createLiteWorkerContext(
     config,
     remoteConfig,
     mainWorkerRpc,
+    botCommandRouter,
   });
 
   const liteMessageHandler = new LiteMessageHandler({
@@ -108,6 +123,7 @@ export function createLiteWorkerContext(
     dispatchHandler,
     persistence,
     slack,
+    config,
     logger,
     channel,
     threadTs,

@@ -5,6 +5,7 @@ import { ConfigOverrides } from '../../../src/services/config-overrides';
 import { mockLogger, type MockLogger } from '../../mocks/mock-logger';
 import type { BuddyConfig, ActiveExecution } from '../../../src/types';
 import type { InitInfo, AccountInfo } from '../../../src/services/claude-session';
+import { allCommands } from '../../../src/commands/index';
 
 function makeConfig(overrides: Partial<BuddyConfig> = {}): BuddyConfig {
   return {
@@ -23,8 +24,8 @@ function makeConfig(overrides: Partial<BuddyConfig> = {}): BuddyConfig {
     triggerEmoji: 'robot_face',
     projectMappingsFile: '',
     mcpServers: {},
+    enabledMcpServers: [],
     plugins: [],
-    interactiveBridgePatterns: [],
     socketPath: '/tmp/sock',
     persistenceSocket: '/tmp/persist',
     gatewaySocket: '/tmp/gateway',
@@ -42,11 +43,14 @@ describe('BotCommandRouter', () => {
     logger = mockLogger();
     configOverrides = new ConfigOverrides();
     config = makeConfig();
-    router = new BotCommandRouter({
-      logger: logger as any,
-      configOverrides,
-      config,
-    });
+    router = new BotCommandRouter(
+      {
+        logger: logger as any,
+        configOverrides,
+        config,
+      },
+      allCommands,
+    );
   });
 
   // ── parse ─────────────────────────────────────────────────────────
@@ -117,9 +121,9 @@ describe('BotCommandRouter', () => {
 
   describe('execute() — model', () => {
     it('sets model override and returns handled', async () => {
-      const result = await router.execute({ command: 'model', args: 'claude-opus-4-6' });
+      const result = await router.execute({ command: 'model', args: 'opus' });
       expect(result.type).toBe('handled');
-      expect(configOverrides.getModel()).toBe('claude-opus-4-6');
+      expect(configOverrides.getModel()).toBe('opus[1m]');
     });
 
     it('returns dispatch when no args given', async () => {
@@ -210,9 +214,9 @@ describe('BotCommandRouter', () => {
     });
 
     it('includes model in status', async () => {
-      configOverrides.setModel('claude-opus-4-6');
+      configOverrides.setModel('opus[1m]');
       const result = await router.execute({ command: 'status', args: '' });
-      expect(result.reply).toContain('claude-opus-4-6');
+      expect(result.reply).toContain('opus[1m]');
     });
 
     it('includes cwd from config when no initInfo', async () => {
@@ -234,7 +238,7 @@ describe('BotCommandRouter', () => {
     const testInitInfo: InitInfo = {
       claudeCodeVersion: '2.3.0',
       cwd: '/home/user/myproject',
-      model: 'claude-opus-4-6',
+      model: 'opus[1m]',
       permissionMode: 'default',
       mcpServers: [
         { name: 'filesystem', status: 'connected' },
@@ -261,7 +265,7 @@ describe('BotCommandRouter', () => {
       statusTs: '1234.5679',
       isBackground: false,
       interrupted: false,
-      model: 'claude-opus-4-6',
+      model: 'opus[1m]',
       costUsd: 0.0234,
       createdAt: Date.now() - 30_000,
       lastActivityAt: Date.now(),
@@ -276,15 +280,18 @@ describe('BotCommandRouter', () => {
     };
 
     beforeEach(() => {
-      fullRouter = new BotCommandRouter({
-        logger: logger as any,
-        configOverrides,
-        config,
-        getCurrentExecution: () => testExecution,
-        getInitInfo: () => testInitInfo,
-        getAccountInfo: () => testAccountInfo,
-        getSessionCost: () => Promise.resolve(0.0567),
-      });
+      fullRouter = new BotCommandRouter(
+        {
+          logger: logger as any,
+          configOverrides,
+          config,
+          getCurrentExecution: () => testExecution,
+          getInitInfo: () => testInitInfo,
+          getAccountInfo: () => testAccountInfo,
+          getSessionCost: () => Promise.resolve(0.0567),
+        },
+        allCommands,
+      );
     });
 
     it('includes version from initInfo', async () => {
@@ -312,7 +319,7 @@ describe('BotCommandRouter', () => {
     it('includes execution status when running', async () => {
       const result = await fullRouter.execute({ command: 'status', args: '' });
       expect(result.reply).toContain('*Status:* Running');
-      expect(result.reply).toContain('*Model:* `claude-opus-4-6`');
+      expect(result.reply).toContain('*Model:* `opus[1m]`');
       expect(result.reply).toContain('*Tools used:* 5');
       expect(result.reply).toContain('*Files changed:* 2');
       expect(result.reply).toContain('*Context:* 42% | *Turns:* 3');
@@ -336,60 +343,75 @@ describe('BotCommandRouter', () => {
     });
 
     it('shows Running (background) when execution is backgrounded', async () => {
-      const bgRouter = new BotCommandRouter({
-        logger: logger as any,
-        configOverrides,
-        config,
-        getCurrentExecution: () => ({ ...testExecution, isBackground: true }),
-        getSessionCost: () => Promise.resolve(0),
-      });
+      const bgRouter = new BotCommandRouter(
+        {
+          logger: logger as any,
+          configOverrides,
+          config,
+          getCurrentExecution: () => ({ ...testExecution, isBackground: true }),
+          getSessionCost: () => Promise.resolve(0),
+        },
+        allCommands,
+      );
       const result = await bgRouter.execute({ command: 'status', args: '' });
       expect(result.reply).toContain('*Status:* Running (background)');
     });
 
     it('shows Interrupted when execution is interrupted', async () => {
-      const intRouter = new BotCommandRouter({
-        logger: logger as any,
-        configOverrides,
-        config,
-        getCurrentExecution: () => ({ ...testExecution, interrupted: true }),
-        getSessionCost: () => Promise.resolve(0),
-      });
+      const intRouter = new BotCommandRouter(
+        {
+          logger: logger as any,
+          configOverrides,
+          config,
+          getCurrentExecution: () => ({ ...testExecution, interrupted: true }),
+          getSessionCost: () => Promise.resolve(0),
+        },
+        allCommands,
+      );
       const result = await intRouter.execute({ command: 'status', args: '' });
       expect(result.reply).toContain('*Status:* Interrupted');
     });
 
     it('omits MCP servers section when empty', async () => {
-      const noMcpRouter = new BotCommandRouter({
-        logger: logger as any,
-        configOverrides,
-        config,
-        getInitInfo: () => ({ ...testInitInfo, mcpServers: [] }),
-        getSessionCost: () => Promise.resolve(0),
-      });
+      const noMcpRouter = new BotCommandRouter(
+        {
+          logger: logger as any,
+          configOverrides,
+          config,
+          getInitInfo: () => ({ ...testInitInfo, mcpServers: [] }),
+          getSessionCost: () => Promise.resolve(0),
+        },
+        allCommands,
+      );
       const result = await noMcpRouter.execute({ command: 'status', args: '' });
       expect(result.reply).not.toContain('*MCP servers:*');
     });
 
     it('omits plugins section when empty', async () => {
-      const noPluginsRouter = new BotCommandRouter({
-        logger: logger as any,
-        configOverrides,
-        config,
-        getInitInfo: () => ({ ...testInitInfo, plugins: [] }),
-        getSessionCost: () => Promise.resolve(0),
-      });
+      const noPluginsRouter = new BotCommandRouter(
+        {
+          logger: logger as any,
+          configOverrides,
+          config,
+          getInitInfo: () => ({ ...testInitInfo, plugins: [] }),
+          getSessionCost: () => Promise.resolve(0),
+        },
+        allCommands,
+      );
       const result = await noPluginsRouter.execute({ command: 'status', args: '' });
       expect(result.reply).not.toContain('*Plugins:*');
     });
 
     it('omits session cost when zero', async () => {
-      const noCostRouter = new BotCommandRouter({
-        logger: logger as any,
-        configOverrides,
-        config,
-        getSessionCost: () => Promise.resolve(0),
-      });
+      const noCostRouter = new BotCommandRouter(
+        {
+          logger: logger as any,
+          configOverrides,
+          config,
+          getSessionCost: () => Promise.resolve(0),
+        },
+        allCommands,
+      );
       const result = await noCostRouter.execute({ command: 'status', args: '' });
       expect(result.reply).not.toContain('*Session cost:*');
     });
@@ -399,7 +421,7 @@ describe('BotCommandRouter', () => {
 
   describe('execute() — clear', () => {
     it('resets overrides and returns handled with clearSession flag', async () => {
-      configOverrides.setModel('claude-opus-4-6');
+      configOverrides.setModel('opus[1m]');
       configOverrides.setEffort('max');
       const result = await router.execute({ command: 'clear', args: '' });
       expect(result.type).toBe('handled');
@@ -432,18 +454,66 @@ describe('BotCommandRouter', () => {
     });
   });
 
-  // ── registering custom commands ───────────────────────────────────
+  // ── isSDKSlashCommand ───────────────────────────────────────────
 
-  describe('registerCommand()', () => {
-    it('allows registering custom command handlers', async () => {
-      router.registerCommand('ping', async (_args) => ({
-        type: 'handled' as const,
-        reply: 'pong',
-      }));
+  describe('isSDKSlashCommand()', () => {
+    it('returns true for SDK slash commands', () => {
+      expect(router.isSDKSlashCommand('review')).toBe(true);
+    });
 
-      const result = await router.execute({ command: 'ping', args: '' });
+    it('returns false for handled commands', () => {
+      expect(router.isSDKSlashCommand('model')).toBe(false);
+    });
+
+    it('returns false for unknown commands', () => {
+      expect(router.isSDKSlashCommand('nonexistent')).toBe(false);
+    });
+  });
+
+  // ── getCatalog ─────────────────────────────────────────────────
+
+  describe('getCatalog()', () => {
+    it('returns deduplicated command definitions', () => {
+      const catalog = router.getCatalog();
+      const names = catalog.map((c) => c.name);
+      expect(new Set(names).size).toBe(names.length);
+    });
+
+    it('includes both handled and SDK commands', () => {
+      const catalog = router.getCatalog();
+      const names = catalog.map((c) => c.name);
+      expect(names).toContain('model');
+      expect(names).toContain('review');
+    });
+  });
+
+  // ── getFormattedCatalog ────────────────────────────────────────
+
+  describe('getFormattedCatalog()', () => {
+    it('returns a formatted string starting with "Available bot commands:"', () => {
+      const catalog = router.getFormattedCatalog();
+      expect(catalog).toMatch(/^Available bot commands:/);
+    });
+
+    it('includes command names', () => {
+      const catalog = router.getFormattedCatalog();
+      expect(catalog).toContain('!model');
+      expect(catalog).toContain('!status');
+    });
+  });
+
+  // ── aliases ────────────────────────────────────────────────────
+
+  describe('alias support', () => {
+    it('resolves alias to the same command', async () => {
+      const result = await router.execute({ command: 'stop', args: '' });
+      // 'stop' is an alias for 'interrupt' — no onInterrupt callback in default setup
       expect(result.type).toBe('handled');
-      expect(result.reply).toBe('pong');
+      expect(result.reply).toContain('No interrupt handler available');
+    });
+
+    it('hasCommand returns true for aliases', () => {
+      expect(router.hasCommand('stop')).toBe(true);
     });
   });
 });

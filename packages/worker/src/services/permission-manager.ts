@@ -175,10 +175,11 @@ export class PermissionManager {
         description: item.lockText,
         alwaysAllowLabel,
       }).catch((err) => {
-        this.logger.warn('Failed to post permission message', {
+        this.logger.error('Failed to post permission message, auto-denying', {
           callbackId: batchId,
           error: err instanceof Error ? err.message : String(err),
         });
+        this.autoDenyBatch(batchId, 'Failed to post permission prompt to Slack');
       });
 
       this.logger.info('Permission posted (single)', { callbackId: batchId });
@@ -193,10 +194,11 @@ export class PermissionManager {
         description: `${items.length} tools requiring permission`,
         tools: items.map(i => ({ tool: i.toolName, description: i.lockText })),
       }).catch((err) => {
-        this.logger.warn('Failed to post batch permission message', {
+        this.logger.error('Failed to post batch permission message, auto-denying', {
           callbackId: batchId,
           error: err instanceof Error ? err.message : String(err),
         });
+        this.autoDenyBatch(batchId, 'Failed to post permission prompt to Slack');
       });
 
       this.logger.info('Permission posted (batch)', { callbackId: batchId, count: items.length });
@@ -254,28 +256,20 @@ export class PermissionManager {
       this.pendingPlanReview = null;
     }
 
-    const { text, blocks, splitMessages } = buildPlanReviewBlocks({
+    const { blocks, splitMessages } = buildPlanReviewBlocks({
       planContent,
       callbackId,
     });
 
-    if (splitMessages) {
-      for (const msgBlocks of splitMessages) {
-        this.slack.postMessage('', '', text, msgBlocks).catch((err) => {
-          this.logger.warn('Failed to post plan review split message', {
-            callbackId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
-    } else {
-      this.slack.postMessage('', '', text, blocks).catch((err) => {
-        this.logger.warn('Failed to post plan review message', {
-          callbackId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+    this.slack.sendInteractivePrompt(callbackId, 'planReview', {
+      planBlocks: blocks,
+      planSplitMessages: splitMessages,
+    }).catch((err) => {
+      this.logger.warn('Failed to post plan review message', {
+        callbackId,
+        error: err instanceof Error ? err.message : String(err),
       });
-    }
+    });
 
     this.logger.info('Plan review posted', { callbackId });
 
@@ -289,6 +283,28 @@ export class PermissionManager {
         createdAt: Date.now(),
       };
     });
+  }
+
+  // ── autoDenyBatch ───────────────────────────────────────────
+
+  /**
+   * Auto-deny all pending permissions in a batch when the Slack prompt fails to post.
+   * Prevents the worker from hanging forever on an unresolvable promise.
+   */
+  private autoDenyBatch(batchId: string, reason: string): void {
+    const batch = this.flushedBatches.get(batchId);
+    const itemIds = batch ? batch.itemIds : new Set([batchId]);
+
+    for (const itemId of itemIds) {
+      const item = this.pendingPermissions.get(itemId);
+      if (item) {
+        this.pendingPermissions.delete(itemId);
+        item.resolve({ approved: false, message: reason });
+      }
+    }
+    this.flushedBatches.delete(batchId);
+    this.onInputReceived?.();
+    this.logger.info('Auto-denied batch due to Slack failure', { batchId, count: itemIds.size });
   }
 
   // ── resolveInteraction ────────────────────────────────────────
@@ -438,6 +454,25 @@ export class PermissionManager {
     // Check individual
     const item = this.pendingPermissions.get(callbackId);
     return item ? [item.toolName] : [];
+  }
+
+  /**
+   * Get the lockText(s) for the pending permission with the given callbackId.
+   * For batch callbackIds, returns all lock texts in the batch.
+   */
+  getLockTexts(callbackId: string): string[] {
+    const batch = this.flushedBatches.get(callbackId);
+    if (batch) {
+      const texts: string[] = [];
+      for (const itemId of batch.itemIds) {
+        const item = this.pendingPermissions.get(itemId);
+        if (item) texts.push(item.lockText);
+      }
+      return texts;
+    }
+
+    const item = this.pendingPermissions.get(callbackId);
+    return item ? [item.lockText] : [];
   }
 
   /**

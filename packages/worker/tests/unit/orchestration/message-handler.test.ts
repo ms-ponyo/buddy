@@ -26,8 +26,8 @@ function makeConfig(overrides: Partial<BuddyConfig> = {}): BuddyConfig {
     triggerEmoji: 'robot_face',
     projectMappingsFile: '',
     mcpServers: {},
+    enabledMcpServers: [],
     plugins: [],
-    interactiveBridgePatterns: [],
     socketPath: '/tmp/sock',
     persistenceSocket: '/tmp/persist',
     gatewaySocket: '/tmp/gateway',
@@ -54,12 +54,14 @@ function makeQueueMessage(overrides: Partial<QueueMessage> & { payload?: Record<
 interface MockWorkerLoop {
   handleMessage: jest.Mock<Promise<void>, [QueueMessage]>;
   interrupt: jest.Mock<void, []>;
+  shuttingDown: boolean;
 }
 
 function makeWorkerLoop(): MockWorkerLoop {
   return {
     handleMessage: jest.fn(async (_msg: QueueMessage) => {}),
     interrupt: jest.fn(),
+    shuttingDown: false,
   };
 }
 
@@ -184,6 +186,20 @@ describe('MessageHandler', () => {
 
       expect(persistence.nack).toHaveBeenCalledWith('inbound', 'msg-fail');
       expect(persistence.ack).toHaveBeenCalledWith('inbound', 'msg-ok');
+    });
+  });
+
+  // ── handleInbound: shutdown skips ack ──────────────────────────────
+
+  describe('handleInbound() — shutdown skips ack', () => {
+    it('does not ack when workerLoop.shuttingDown is true', async () => {
+      workerLoop.shuttingDown = true;
+      const msg = makeQueueMessage({ id: 'shutdown-msg' });
+      await handler.handleInbound([msg]);
+
+      expect(workerLoop.handleMessage).toHaveBeenCalledWith(msg, expect.any(Function));
+      expect(persistence.ack).not.toHaveBeenCalled();
+      expect(persistence.nack).not.toHaveBeenCalled();
     });
   });
 

@@ -92,9 +92,32 @@ export class SlackAdapter {
     return { fileId: '' };
   }
 
+  async uploadContent(
+    channel: string,
+    threadTs: string,
+    filename: string,
+    content: string,
+    caption?: string,
+  ): Promise<void> {
+    const message: Record<string, unknown> = {
+      type: 'fileUpload',
+      channel_id: channel,
+      thread_ts: threadTs,
+      filename,
+      content,
+    };
+    if (caption) message.initial_comment = caption;
+
+    await this.persistenceClient.call('queue.enqueue', {
+      queue: 'outbound',
+      threadKey: this.threadKey,
+      message,
+    });
+  }
+
   async sendInteractivePrompt(
     callbackId: string,
-    promptType: 'permission' | 'question' | 'terminal',
+    promptType: 'permission' | 'question' | 'terminal' | 'planReview',
     display: unknown,
   ): Promise<void> {
     await this.persistenceClient.call('queue.enqueue', {
@@ -290,6 +313,10 @@ export class SlackAdapter {
 
   async deregisterFromGateway(): Promise<void> {
     await this.gatewayClient.call('worker.deregister', {});
+  }
+
+  async setWorkerState(state: 'starting' | 'idle' | 'busy'): Promise<void> {
+    await this.gatewayClient.call('worker.setState', { threadKey: this.threadKey, state });
   }
 
   async close(): Promise<void> {

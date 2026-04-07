@@ -161,14 +161,24 @@ function formatDiffBody(hunks: Hunk[]): string {
  * Format a diff as a markdown string for inline streaming.
  * Returns null if there are no changes.
  */
+export interface DiffResult {
+  text: string;
+  truncated: boolean;
+}
+
 export function formatDiffMarkdown(input: DiffInput): string | null {
+  const result = formatDiffMarkdownEx(input);
+  return result?.text ?? null;
+}
+
+export function formatDiffMarkdownEx(input: DiffInput): DiffResult | null {
   try {
     if (!input?.file_path || input.old_string == null || input.new_string == null) {
       return null;
     }
 
     if (isBinaryContent(input.old_string) || isBinaryContent(input.new_string)) {
-      return `\`${input.file_path}\` — *Binary file changed*`;
+      return { text: `\`${input.file_path}\` — *Binary file changed*`, truncated: false };
     }
 
     if (input.old_string === '' && input.new_string === '') {
@@ -190,22 +200,113 @@ export function formatDiffMarkdown(input: DiffInput): string | null {
       if (line.type === '-') deletions++;
     }
 
+    let truncated = false;
     const diffBody = formatDiffBody(hunks);
     const diffOutputLines = diffBody.split('\n');
-    let finalDiff = diffOutputLines.length > MAX_DIFF_LINES
-      ? diffOutputLines.slice(0, MAX_DIFF_LINES).join('\n') + '\n... (truncated)'
-      : diffBody;
+    let finalDiff: string;
+    if (diffOutputLines.length > MAX_DIFF_LINES) {
+      finalDiff = diffOutputLines.slice(0, MAX_DIFF_LINES).join('\n') + '\n... (truncated)';
+      truncated = true;
+    } else {
+      finalDiff = diffBody;
+    }
 
     // Enforce character limit consistent with MARKDOWN_BLOCK_MAX_LENGTH
     if (finalDiff.length > MARKDOWN_BLOCK_MAX_LENGTH - 200) {
       finalDiff = finalDiff.slice(0, MARKDOWN_BLOCK_MAX_LENGTH - 200) + '\n... (truncated)';
+      truncated = true;
     }
 
     const startLine = hunks[0].oldStart;
     const lineRef = startLine > 1 ? ` L${startLine}` : '';
     const summary = `\`${input.file_path}\`${lineRef} — **+${additions} -${deletions}**`;
 
-    return summary + '\n```diff\n' + finalDiff + '\n```';
+    return { text: summary + '\n```diff\n' + finalDiff + '\n```', truncated };
+  } catch {
+    return null;
+  }
+}
+
+// ── File create formatting ──────────────────────────────────────────
+
+const MAX_CREATE_LINES = 60;
+
+const EXT_LANG: Record<string, string> = {
+  ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',
+  py: 'python', rb: 'ruby', go: 'go', rs: 'rust', java: 'java',
+  sh: 'bash', zsh: 'bash', bash: 'bash', sql: 'sql', json: 'json',
+  yaml: 'yaml', yml: 'yaml', toml: 'toml', xml: 'xml', html: 'html',
+  css: 'css', scss: 'scss', md: 'markdown', swift: 'swift', kt: 'kotlin',
+  c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
+};
+
+function langFromPath(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() ?? '';
+  return EXT_LANG[ext] ?? '';
+}
+
+export interface FileCreateResult {
+  text: string;
+  truncated: boolean;
+}
+
+/**
+ * Format new file content as a markdown code block for inline streaming.
+ * Returns the formatted text and whether it was truncated.
+ */
+export function formatFileCreateMarkdown(filePath: string, content: string): FileCreateResult | null {
+  try {
+    if (!filePath || content == null) return null;
+
+    if (isBinaryContent(content)) {
+      return { text: `\`${filePath}\` — *Binary file created*`, truncated: false };
+    }
+
+    const lines = content.split('\n');
+    const lineCount = lines.length;
+    const lang = langFromPath(filePath);
+
+    let displayContent: string;
+    let truncated = false;
+
+    if (lineCount > MAX_CREATE_LINES) {
+      displayContent = lines.slice(0, MAX_CREATE_LINES).join('\n') + '\n... (truncated)';
+      truncated = true;
+    } else {
+      displayContent = content;
+    }
+
+    // Enforce character limit
+    if (displayContent.length > MARKDOWN_BLOCK_MAX_LENGTH - 200) {
+      displayContent = displayContent.slice(0, MARKDOWN_BLOCK_MAX_LENGTH - 200) + '\n... (truncated)';
+      truncated = true;
+    }
+
+    const summary = `\`${filePath}\` — **new file** (${lineCount} lines)`;
+    const text = summary + '\n```' + lang + '\n' + displayContent + '\n```';
+    return { text, truncated };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate a full unified diff string (no truncation) for file upload.
+ */
+export function formatFullDiff(input: DiffInput): string | null {
+  try {
+    if (!input?.file_path || input.old_string == null || input.new_string == null) return null;
+    if (isBinaryContent(input.old_string) || isBinaryContent(input.new_string)) return null;
+    if (input.old_string === '' && input.new_string === '') return null;
+
+    const oldLines = input.old_string.split('\n');
+    const newLines = input.new_string.split('\n');
+    const lineOffset = (input.startLine && input.startLine > 1) ? input.startLine - 1 : 0;
+    const diffLines = computeDiffLines(oldLines, newLines);
+    const hunks = buildHunks(diffLines, 3, lineOffset);
+    if (hunks.length === 0) return null;
+
+    return `--- ${input.file_path}\n+++ ${input.file_path}\n` + formatDiffBody(hunks);
   } catch {
     return null;
   }

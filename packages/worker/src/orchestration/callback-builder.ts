@@ -16,6 +16,7 @@ export interface CallbackDeps {
   onToolEnd: () => void;
   onImageContent: (imageData: Buffer, mediaType: string, toolName?: string) => void;
   onTurnResult: (result: ClaudeResult) => boolean;
+  onToolUseTracked: (toolName: string, input: Record<string, unknown>) => void;
   enqueueMainChunks: () => void;
   enqueueTodoChunks: () => void;
   enqueueTodoStop: () => void;
@@ -25,7 +26,7 @@ export interface CallbackDeps {
 // ── Factory ───────────────────────────────────────────────────────────
 
 export function buildCallbacks(deps: CallbackDeps): SessionCallbacks {
-  const { progress, logger, touchActivity, onToolStart, onToolEnd, onImageContent, onTurnResult, enqueueMainChunks, enqueueTodoChunks, enqueueTodoStop, setTypingStatus } = deps;
+  const { progress, logger, touchActivity, onToolStart, onToolEnd, onImageContent, onTurnResult, onToolUseTracked, enqueueMainChunks, enqueueTodoChunks, enqueueTodoStop, setTypingStatus } = deps;
 
   // Mutable per-invocation state
   let pendingStreamText = '';
@@ -51,6 +52,7 @@ export function buildCallbacks(deps: CallbackDeps): SessionCallbacks {
     onToolUse(toolName: string, input: Record<string, unknown>, toolUseId: string): void {
       touchActivity();
       onToolStart(toolName);
+      onToolUseTracked(toolName, input);
 
       // Pass any accumulated thinking/stream text as reasoning before the tool use.
       // Prefer thinking text (model reasoning) over stream text (visible output).

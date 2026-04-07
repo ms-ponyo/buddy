@@ -9,18 +9,11 @@
 
 import type { QueueMessage } from '@buddy/shared';
 import type { Logger } from './logger.js';
+import type { BuddyConfig } from './types.js';
 import type { PersistenceAdapter } from './adapters/persistence-adapter.js';
 import type { SlackAdapter } from './adapters/slack-adapter.js';
 import type { BotCommandRouter } from './services/bot-command-router.js';
 import type { DispatchHandler } from './handlers/dispatch-handler.js';
-
-// Known SDK slash commands forwarded to the main worker as /command.
-// Anything not here and not a registered bot command goes to Haiku.
-const SDK_SLASH_COMMANDS = new Set([
-  'compact', 'context', 'review', 'config', 'permissions', 'mcp',
-  'listen', 'vim', 'diff', 'init-worktree', 'login', 'logout',
-]);
-
 // ── Constructor deps ────────────────────────────────────────────────
 
 export interface LiteMessageHandlerDeps {
@@ -28,6 +21,7 @@ export interface LiteMessageHandlerDeps {
   dispatchHandler: DispatchHandler;
   persistence: PersistenceAdapter;
   slack: SlackAdapter;
+  config: BuddyConfig;
   logger: Logger;
   channel: string;
   threadTs: string;
@@ -41,6 +35,7 @@ export class LiteMessageHandler {
   private readonly dispatchHandler: DispatchHandler;
   private readonly persistence: PersistenceAdapter;
   private readonly slack: SlackAdapter;
+  private readonly config: BuddyConfig;
   private readonly logger: Logger;
   private readonly channel: string;
   private readonly threadTs: string;
@@ -51,6 +46,7 @@ export class LiteMessageHandler {
     this.dispatchHandler = deps.dispatchHandler;
     this.persistence = deps.persistence;
     this.slack = deps.slack;
+    this.config = deps.config;
     this.logger = deps.logger;
     this.channel = deps.channel;
     this.threadTs = deps.threadTs;
@@ -119,66 +115,73 @@ export class LiteMessageHandler {
     if (prompt) {
       const parsed = this.botCommandRouter.parse(prompt);
       if (parsed) {
-        // Check if this is a registered bot command
-        const isRegistered = this.botCommandRouter.hasCommand(parsed.command);
-
-        if (!isRegistered) {
-          if (SDK_SLASH_COMMANDS.has(parsed.command)) {
-            // Known SDK slash command -> rewrite to /command and forward to main worker
-            const slashCommand = this.botCommandRouter.rewriteSlashCommand(prompt);
-            this.logger.info('LiteMessageHandler: forwarding SDK slash command to main worker', {
-              command: parsed.command,
-              rewritten: slashCommand,
-            });
-            const threadKey = `${this.channel}:${this.threadTs}`;
-            await this.persistence.enqueue('inbound', threadKey, { prompt: slashCommand });
-            return;
-          }
-          // Truly unknown command -> let Haiku provide a helpful response
-          this.logger.debug('LiteMessageHandler: unknown command, dispatching to Haiku', {
+        // SDK slash commands → forward to main worker as /command
+        if (this.botCommandRouter.isSDKSlashCommand(parsed.command)) {
+          const slashCommand = this.botCommandRouter.rewriteSlashCommand(prompt);
+          this.logger.info('LiteMessageHandler: forwarding SDK slash command to main worker', {
             command: parsed.command,
+            rewritten: slashCommand,
           });
-          await this.dispatchHandler.feed(prompt);
+          const threadKey = `${this.channel}:${this.threadTs}`;
+          await this.persistence.enqueue('inbound', threadKey, { prompt: slashCommand });
           return;
         }
 
-        this.logger.debug('LiteMessageHandler: bot command', { command: parsed.command });
-        try {
-          const result = await this.botCommandRouter.execute(parsed);
+        // Registered bot command → execute locally
+        if (this.botCommandRouter.hasCommand(parsed.command)) {
+          this.logger.debug('LiteMessageHandler: bot command', { command: parsed.command });
+          try {
+            const result = await this.botCommandRouter.execute(parsed);
 
-          if (result.type === 'handled') {
-            // Post reply to thread
-            if (result.reply) {
-              await this.slack.postMessage(
-                this.channel,
-                this.threadTs,
-                result.reply,
-                [{ type: 'markdown', text: result.reply }],
-              ).catch((err) => {
-                this.logger.warn('LiteMessageHandler: failed to post command reply', { error: String(err) });
-              });
+            if (result.type === 'handled') {
+              if (result.reply) {
+                await this.slack.postMessage(
+                  this.channel,
+                  this.threadTs,
+                  result.reply,
+                  [{ type: 'markdown', text: result.reply }],
+                ).catch((err) => {
+                  this.logger.warn('LiteMessageHandler: failed to post command reply', { error: String(err) });
+                });
+              }
+              return;
             }
+
+            // type === 'forward' → enqueue as user prompt to main worker
+            if (result.type === 'forward') {
+              const threadKey = `${this.channel}:${this.threadTs}`;
+              this.logger.info('LiteMessageHandler: forwarding command to main worker', {
+                command: parsed.command,
+              });
+              await this.persistence.enqueue('inbound', threadKey, { prompt: result.reply ?? prompt });
+              return;
+            }
+
+            // type === 'dispatch' → feed to DispatchHandler
+            await this.dispatchHandler.feed(result.reply ?? prompt);
+            return;
+          } catch (err) {
+            const errMsg = err instanceof Error ? err.message : String(err);
+            this.logger.warn('LiteMessageHandler: bot command failed, dispatching', {
+              command: parsed.command,
+              error: errMsg,
+            });
+            await this.dispatchHandler.feed(
+              `!${parsed.command} ${parsed.args}\n\nCommand failed: ${errMsg}. Please help the user.`,
+            );
             return;
           }
-
-          // type === 'dispatch' → feed to DispatchHandler
-          await this.dispatchHandler.feed(result.reply ?? prompt);
-          return;
-        } catch (err) {
-          // Command execution failed → feed command + error to DispatchHandler
-          const errMsg = err instanceof Error ? err.message : String(err);
-          this.logger.warn('LiteMessageHandler: bot command failed, dispatching', {
-            command: parsed.command,
-            error: errMsg,
-          });
-          await this.dispatchHandler.feed(
-            `!${parsed.command} ${parsed.args}\n\nCommand failed: ${errMsg}. Please help the user.`,
-          );
-          return;
         }
+
+        // Unknown command → let Haiku provide a helpful response
+        this.logger.debug('LiteMessageHandler: unknown command, dispatching to Haiku', {
+          command: parsed.command,
+        });
+        await this.dispatchHandler.feed(prompt);
+        return;
       }
 
-      // Not a command → feed prompt to DispatchHandler (needs LLM)
+      // Not a command → feed prompt to DispatchHandler
       await this.dispatchHandler.feed(prompt);
       return;
     }

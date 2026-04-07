@@ -10,6 +10,7 @@ import { createWorkerContext } from './context.js';
 import type { WorkerContext } from './context.js';
 import { registerWorkerControlHandlers } from './rpc-handlers.js';
 import { BotCommandRouter } from './services/bot-command-router.js';
+import { allCommands } from './commands/index.js';
 
 // ── Validate required env ─────────────────────────────────────────
 
@@ -89,8 +90,9 @@ function createWorkerRpcServer(): RpcServer {
     const actionStr = typeof action === 'string' ? action : '';
     if (actionStr === 'allow' || actionStr === 'always' || actionStr === 'deny') {
       const approved = actionStr !== 'deny';
-      // Capture tool names before resolveInteraction clears the pending state
+      // Capture tool names and lock texts before resolveInteraction clears the pending state
       const permToolNames = ctx.permissions.getToolNames(callbackId);
+      const permLockTexts = ctx.permissions.getLockTexts(callbackId);
       // On "always", determine the right updatedPermissions:
       // - For file tools (Edit/Write/NotebookEdit), switch to acceptEdits mode
       //   instead of adding individual allow rules
@@ -101,6 +103,9 @@ function createWorkerRpcServer(): RpcServer {
         const allFileTools = permToolNames.length > 0 && permToolNames.every(t => FILE_TOOLS.has(t));
         if (allFileTools) {
           updatedPermissions = [{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }];
+          // Actually switch the mode so subsequent file-tool hooks auto-allow
+          ctx.configOverrides.setPermissionMode('acceptEdits');
+          ctx.claudeSession.setPermissionMode('acceptEdits');
         } else {
           updatedPermissions = ctx.permissions.getSuggestions(callbackId);
         }
@@ -114,6 +119,7 @@ function createWorkerRpcServer(): RpcServer {
         const alwaysPattern = updatedPermissions ? formatPermPattern(updatedPermissions) : undefined;
         ctx.progress.onPermissionResult(callbackId, approved, {
           toolNames: permToolNames,
+          lockTexts: permLockTexts,
           alwaysAllow: actionStr === 'always',
           alwaysPattern,
         });
@@ -123,13 +129,21 @@ function createWorkerRpcServer(): RpcServer {
             type: 'stream_chunk',
             channel: ctx.channel,
             threadTs: ctx.threadTs,
-            userId: '',
+            userId: ctx.workerLoop.currentUserId,
             streamType: 'main',
             chunks,
           } as any).catch(() => {});
         }
         return {};
       }
+    }
+
+    // Try plan review (approve/reject button clicks)
+    if (actionStr === 'approve' || actionStr === 'reject') {
+      const resolved = ctx.permissions.resolveInteraction(callbackId, {
+        approved: actionStr === 'approve',
+      });
+      if (resolved) return {};
     }
 
     // Try question answer (button value has "callbackId:qi:value" format,
@@ -141,8 +155,6 @@ function createWorkerRpcServer(): RpcServer {
       if (resolved) return {};
     }
 
-    // Try interactive bridge (pattern-based terminal sessions)
-    ctx.bridge.resolveInteraction(callbackId, action as any);
     return {};
   });
 
@@ -177,6 +189,13 @@ function createWorkerRpcServer(): RpcServer {
     (method, handler) => server.registerMethod(method, handler as any),
   );
 
+  // worker.getSupportedCommands — return supported commands from the active SDK session
+  server.registerMethod('worker.getSupportedCommands', async () => {
+    if (!ctx) return { commands: null };
+    const commands = await ctx.claudeSession.getSupportedCommands();
+    return { commands };
+  });
+
   // worker.executeBotCommand — execute a bot command or forward SDK slash commands
   let botCommandRouter: BotCommandRouter | undefined;
   server.registerMethod('worker.executeBotCommand', async (params) => {
@@ -185,14 +204,48 @@ function createWorkerRpcServer(): RpcServer {
 
     // Lazily create router (needs ctx to be initialized)
     if (!botCommandRouter) {
-      botCommandRouter = new BotCommandRouter({
-        logger: ctx.logger,
-        configOverrides: ctx.configOverrides,
-        config: ctx.config,
-        getCurrentExecution: () => ctx!.workerLoop.currentExecution,
-        getInitInfo: () => ctx!.claudeSession.getInitInfo(),
-        getAccountInfo: () => ctx!.claudeSession.getAccountInfo(),
+      botCommandRouter = new BotCommandRouter(
+        {
+          logger: ctx.logger,
+          configOverrides: ctx.configOverrides,
+          config: ctx.config,
+          getCurrentExecution: () => ctx!.workerLoop.currentExecution,
+          getInitInfo: () => ctx!.claudeSession.getInitInfo(),
+          getAccountInfo: () => ctx!.claudeSession.getAccountInfo(),
+          onInterrupt: () => ctx!.workerLoop.interrupt(),
+          onPermissionModeChange: (mode) => { ctx!.claudeSession.setPermissionMode(mode); },
+          getSupportedCommands: () => ctx!.claudeSession.getSupportedCommands(),
+        },
+        allCommands,
+      );
+    }
+
+    // !insights — forward to SDK, then post a detailed summary to Slack
+    if (command === 'insights') {
+      await ctx.persistence.enqueue('inbound', threadKey, { prompt: `/insights${args ? ' ' + args : ''}` });
+      await ctx.persistence.enqueue('inbound', threadKey, {
+        prompt: 'You just generated a Claude Code insights report. The full insights data is in your conversation context above. '
+          + 'Now post a detailed, well-formatted summary to this Slack thread covering ALL sections:\n'
+          + '1. At a Glance (what\'s working, what\'s hindering, quick wins)\n'
+          + '2. Project Areas (list each area with session count)\n'
+          + '3. Interaction Style (key pattern and narrative highlights)\n'
+          + '4. Impressive Things (top workflows)\n'
+          + '5. Friction Analysis (each category with examples)\n'
+          + '6. Suggestions (CLAUDE.md additions, features to try with code examples, usage pattern improvements)\n'
+          + '7. On the Horizon (future opportunities with copyable prompts)\n'
+          + '8. Fun Ending\n\n'
+          + 'Use Slack formatting: *bold* for headers, bullet points, code blocks for prompts/code. '
+          + 'Be comprehensive — include specific examples, numbers, and actionable details from each section. '
+          + 'This should be a complete standalone report the user can share.',
       });
+      return { type: 'handled', reply: 'Generating insights report... This analyzes your session history and makes multiple API calls, so it may take a few minutes.' };
+    }
+
+    // SDK slash command → forward to main worker inbound as /command
+    if (botCommandRouter.isSDKSlashCommand(command)) {
+      const slashCommand = `/${command}${args ? ' ' + args : ''}`;
+      await ctx.persistence.enqueue('inbound', threadKey, { prompt: slashCommand });
+      return { type: 'handled', reply: `Forwarded \`${slashCommand}\` to the SDK session.` };
     }
 
     // Registered bot command → execute locally
@@ -200,15 +253,7 @@ function createWorkerRpcServer(): RpcServer {
       return botCommandRouter.execute({ command, args });
     }
 
-    // Known SDK slash command → enqueue to main worker inbound as /command
-    const SDK_COMMANDS = ['compact','context','review','config','permissions','mcp','listen','vim','diff','init-worktree','login','logout'];
-    if (SDK_COMMANDS.includes(command)) {
-      const slashCommand = `/${command}${args ? ' ' + args : ''}`;
-      await ctx.persistence.enqueue('inbound', threadKey, { prompt: slashCommand });
-      return { type: 'handled', reply: `Forwarded \`${slashCommand}\` to the SDK session.` };
-    }
-
-    // Truly unknown command
+    // Unknown command
     return { type: 'dispatch', reply: `Unknown command "${command}". Try !help to see available commands.` };
   });
 

@@ -78,6 +78,23 @@ export class QueueService {
     })();
   }
 
+  resetForQueue(queue: QueueName): void {
+    // Called when a wildcard subscriber (e.g. gateway on outbound) disconnects:
+    // reset ALL delivered messages for the queue back to pending.
+    const now = new Date().toISOString();
+    this.db.transaction(() => {
+      const rows = this.stmts.selectActiveForQueue.all(queue) as DbRow[];
+      for (const row of rows) {
+        const newRetryCount = row.retry_count + 1;
+        if (newRetryCount >= CONFIG.MAX_RETRIES) {
+          this.stmts.deadletter.run('deadlettered', 'Subscriber disconnected, exceeded max retries', newRetryCount, now, row.id);
+        } else {
+          this.stmts.retry.run('pending', newRetryCount, now, row.id);
+        }
+      }
+    })();
+  }
+
   prune(): number {
     const cutoff = new Date(Date.now() - CONFIG.PRUNE_AGE_MS).toISOString();
     const result = this.stmts.prune.run(cutoff);
@@ -106,6 +123,9 @@ export class QueueService {
       ),
       selectActiveForThreadAndQueue: this.db.prepare(
         `SELECT * FROM queue_messages WHERE thread_key = ? AND queue = ? AND status = 'delivered'`
+      ),
+      selectActiveForQueue: this.db.prepare(
+        `SELECT * FROM queue_messages WHERE queue = ? AND status = 'delivered'`
       ),
       updateStatus: this.db.prepare(
         `UPDATE queue_messages SET status = ?, updated_at = ? WHERE id = ?`

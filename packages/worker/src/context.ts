@@ -17,7 +17,6 @@ import { PersistenceAdapter } from './adapters/persistence-adapter.js';
 import { ProgressTracker } from './services/progress-tracker.js';
 import { ConfigOverrides } from './services/config-overrides.js';
 import { PermissionManager } from './services/permission-manager.js';
-import { InteractiveBridge } from './services/interactive-bridge.js';
 import { McpRegistry } from './services/mcp-registry.js';
 import { createSlackToolsServer } from './mcp-servers/slack-tools-server.js';
 import { createVscodeTunnelServer } from './mcp-servers/vscode-tunnel-server.js';
@@ -36,7 +35,6 @@ export interface WorkerContext {
   persistence: PersistenceAdapter;
   progress: ProgressTracker;
   permissions: PermissionManager;
-  bridge: InteractiveBridge;
   interactiveBash: InteractiveBashSession;
   configOverrides: ConfigOverrides;
   mcpRegistry: McpRegistry;
@@ -80,6 +78,8 @@ export function createWorkerContext(
   const progress = new ProgressTracker();
   progress.setProjectDir(config.projectDir);
   const configOverrides = new ConfigOverrides();
+  // workerLoop is created later — use a late-binding ref so onInputReceived can touch activity.
+  let workerLoopRef: WorkerLoop | null = null;
   const permissions = new PermissionManager({
     slack,
     logger,
@@ -87,10 +87,11 @@ export function createWorkerContext(
       slack.enqueueOutbound({ type: 'stream_pause', channel, threadTs, streamTypes: ['main'] }).catch(() => {});
     },
     onInputReceived: () => {
-      // No explicit resume — next stream_chunk triggers implicit start on gateway
+      // Touch activity so the health monitor doesn't see a stale last_activity_sec
+      // in the window between permission resolution and the next SDK event.
+      workerLoopRef?.touchActivity();
     },
   });
-  const bridge = new InteractiveBridge({ slack, logger });
   const mcpRegistry = new McpRegistry();
 
   // Register in-process MCP server factories
@@ -125,7 +126,6 @@ export function createWorkerContext(
     claudeSession,
     progress,
     permissions,
-    bridge,
     configOverrides,
     mcpRegistry,
     logger,
@@ -133,6 +133,7 @@ export function createWorkerContext(
     channel,
     threadTs,
   });
+  workerLoopRef = workerLoop;
 
   const messageHandler = new MessageHandler({
     workerLoop,
@@ -150,7 +151,6 @@ export function createWorkerContext(
     persistence,
     progress,
     permissions,
-    bridge,
     interactiveBash,
     configOverrides,
     mcpRegistry,

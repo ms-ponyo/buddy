@@ -203,8 +203,8 @@ export function createDispatchControlRpcServer(rpcClient: RpcClient) {
       tool(
         "execute_bot_command",
         "Execute a bot command directly. Use this instead of telling the user to type the command. "
-        + "Bot commands: model, mode, effort, budget, clear, status, help, interrupt, stop, cost, usage, compact, bg, version, doctor, agents, fallback, agent, system, tools, worktree, pr, log. "
-        + "SDK slash commands (forwarded to main worker): context, review, config, permissions, mcp, listen, vim, diff, init-worktree, login, logout.",
+        + "Bot commands: model, mode, effort, budget, clear, status, help, interrupt, stop, cost, usage, compact, bg, version, doctor, agents, fallback, agent, system, tools, worktree, pr, log, insights-report. "
+        + "SDK slash commands (forwarded to main worker): context, review, config, permissions, mcp, listen, vim, diff, init-worktree, login, logout, insights.",
         {
           command: z.string().describe(
             "The bot command name (e.g. 'clear', 'cost', 'model', 'effort', 'budget', 'status')"

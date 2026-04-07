@@ -12,11 +12,19 @@ import type {
 
 // ── Types for the SDK query function ────────────────────────────
 
+/** Minimal shape returned by supportedCommands(). */
+export interface SDKSlashCommand {
+  name: string;
+  description: string;
+  argumentHint: string;
+}
+
 /** Minimal interface for a Query returned by the SDK. */
 interface SDKQuery extends AsyncIterable<Record<string, unknown>> {
   close(): void;
   setPermissionMode(mode: string): void;
   accountInfo(): Promise<Record<string, unknown>>;
+  supportedCommands(): Promise<SDKSlashCommand[]>;
 }
 
 /** Function signature for the SDK's query() function. */
@@ -129,9 +137,11 @@ export class ClaudeSessionService {
     try {
       for await (const message of q) {
         const msg = message as Record<string, unknown>;
+        log.debug('SDK message', { type: msg.type, subtype: (msg as any).subtype });
 
         // ── System messages ──────────────────────────────────
         if (msg.type === 'system') {
+          log.debug('System message', { subtype: msg.subtype });
           if (msg.subtype === 'init') {
             const initSessionId = msg.session_id as string;
             if (!this.currentSessionId) {
@@ -164,6 +174,16 @@ export class ClaudeSessionService {
 
           if (msg.subtype === 'status') {
             callbacks.onStatusChange(msg.status as 'compacting' | null);
+          }
+
+          // Local slash command output (e.g. /files, /skills) — capture as
+          // assistant-style text so it appears in the turn result.
+          if (msg.subtype === 'local_command_output') {
+            const content = msg.content as string;
+            if (content) {
+              lastAssistantText = content;
+              callbacks.onStreamDelta(content);
+            }
           }
         }
 
@@ -226,6 +246,7 @@ export class ClaudeSessionService {
 
         // ── Result message ───────────────────────────────────
         if (msg.type === 'result') {
+          log.debug('Result message', { subtype: msg.subtype, result: typeof msg.result === 'string' ? msg.result.slice(0, 200) : undefined, lastAssistantText: lastAssistantText.slice(0, 200) || undefined });
           const resultData = this.handleResultMessage(msg, lastTurnInputTokens);
           this.currentSessionId = resultData.sessionId;
           resultText = resultData.resultText || lastAssistantText;
@@ -324,6 +345,19 @@ export class ClaudeSessionService {
    */
   hasActiveQuery(): boolean {
     return this.activeQuery !== null;
+  }
+
+  /**
+   * Get the list of available skills/commands from the active SDK query.
+   * Returns null if there is no active query.
+   */
+  async getSupportedCommands(): Promise<SDKSlashCommand[] | null> {
+    if (!this.activeQuery) return null;
+    try {
+      return await this.activeQuery.supportedCommands();
+    } catch {
+      return null;
+    }
   }
 
   /**

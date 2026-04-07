@@ -1,5 +1,5 @@
 // tests/unit/services/permission-manager.test.ts
-import { jest, describe, it, expect, beforeEach } from '@jest/globals';
+import { jest, describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { PermissionManager } from '../../../src/services/permission-manager';
 import { mockSlackAdapter, type MockSlackAdapter } from '../../mocks/mock-slack-adapter';
 import { mockLogger, type MockLogger } from '../../mocks/mock-logger';
@@ -10,12 +10,17 @@ describe('PermissionManager', () => {
   let pm: PermissionManager;
 
   beforeEach(() => {
+    jest.useFakeTimers();
     slack = mockSlackAdapter();
     logger = mockLogger();
     pm = new PermissionManager({
       slack: slack as any,
       logger: logger as any,
     });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
   // ── requestPermission ───────────────────────────────────────────────
@@ -33,6 +38,9 @@ describe('PermissionManager', () => {
         lockText: '`Bash` -> `ls -la`',
         suggestions: undefined,
       });
+
+      // Advance past batch debounce (200ms)
+      jest.advanceTimersByTime(300);
 
       // Should have sent an interactive prompt
       expect(slack.sendInteractivePrompt).toHaveBeenCalled();
@@ -59,6 +67,8 @@ describe('PermissionManager', () => {
         suggestions: [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'rm:*' }], behavior: 'allow', destination: 'session' }],
       });
 
+      jest.advanceTimersByTime(300);
+
       pm.resolveInteraction('perm-2', { approved: false, message: 'Too dangerous' });
 
       const result = await promise;
@@ -80,6 +90,8 @@ describe('PermissionManager', () => {
         lockText: '`Bash` -> `git status`',
         suggestions,
       });
+
+      jest.advanceTimersByTime(300);
 
       expect(pm.getSuggestions('perm-always')).toEqual(suggestions);
       expect(pm.getSuggestions('nonexistent')).toBeUndefined();
@@ -103,6 +115,9 @@ describe('PermissionManager', () => {
         suggestions: undefined,
       });
 
+      // Advance to flush first batch
+      jest.advanceTimersByTime(300);
+
       const promise2 = pm.requestPermission({
         toolName: 'Bash',
         toolInput: { command: 'echo 2' },
@@ -114,13 +129,17 @@ describe('PermissionManager', () => {
         suggestions: undefined,
       });
 
-      // Old one should have been rejected
-      await expect(promise1).rejects.toThrow('Superseded');
+      // Advance to flush second batch
+      jest.advanceTimersByTime(300);
 
-      // New one can be resolved
+      // Both are pending — resolve perm-new then perm-old
       pm.resolveInteraction('perm-new', { approved: true });
-      const result = await promise2;
-      expect(result).toEqual({ approved: true });
+      const result2 = await promise2;
+      expect(result2).toEqual({ approved: true });
+
+      pm.resolveInteraction('perm-old', { approved: false });
+      const result1 = await promise1;
+      expect(result1).toEqual({ approved: false });
     });
   });
 
@@ -130,8 +149,6 @@ describe('PermissionManager', () => {
     it('posts question blocks and resolves when resolveInteraction is called', async () => {
       const promise = pm.askUserQuestion({
         callbackId: 'q-1',
-        channel: 'C123',
-        threadTs: '1111.2222',
         questions: [
           {
             header: 'Pick a color',
@@ -145,7 +162,7 @@ describe('PermissionManager', () => {
         ],
       });
 
-      expect(slack.postMessage).toHaveBeenCalled();
+      expect(slack.sendInteractivePrompt).toHaveBeenCalled();
       expect(pm.hasPending).toBe(true);
 
       pm.resolveInteraction('q-1', { answer: 'Red' });
@@ -157,15 +174,11 @@ describe('PermissionManager', () => {
     it('replaces existing pending question', async () => {
       const promise1 = pm.askUserQuestion({
         callbackId: 'q-old',
-        channel: 'C123',
-        threadTs: '1111.2222',
         questions: [],
       });
 
       const promise2 = pm.askUserQuestion({
         callbackId: 'q-new',
-        channel: 'C123',
-        threadTs: '1111.2222',
         questions: [],
       });
 
@@ -183,7 +196,7 @@ describe('PermissionManager', () => {
     it('posts plan blocks and resolves when resolveInteraction is called', async () => {
       const promise = pm.requestPlanReview('## Step 1\nDo thing', 'plan-1');
 
-      expect(slack.postMessage).toHaveBeenCalled();
+      expect(slack.sendInteractivePrompt).toHaveBeenCalledWith('plan-1', 'planReview', expect.objectContaining({ planBlocks: expect.any(Array) }));
       expect(pm.hasPending).toBe(true);
 
       pm.resolveInteraction('plan-1', { approved: true });
@@ -228,6 +241,8 @@ describe('PermissionManager', () => {
         suggestions: undefined,
       });
 
+      jest.advanceTimersByTime(300);
+
       expect(pm.resolveInteraction('perm-match', { approved: true })).toBe(true);
     });
 
@@ -247,6 +262,8 @@ describe('PermissionManager', () => {
         suggestions: undefined,
       });
 
+      jest.advanceTimersByTime(300);
+
       expect(pm.resolveInteraction('perm-once', { approved: true })).toBe(true);
       expect(pm.resolveInteraction('perm-once', { approved: true })).toBe(false);
     });
@@ -263,10 +280,10 @@ describe('PermissionManager', () => {
         suggestions: undefined,
       });
 
+      jest.advanceTimersByTime(300);
+
       const qPromise = pm.askUserQuestion({
         callbackId: 'q-x',
-        channel: 'C123',
-        threadTs: '1111.2222',
         questions: [],
       });
 
@@ -304,8 +321,6 @@ describe('PermissionManager', () => {
     it('returns true when a question is pending', () => {
       pm.askUserQuestion({
         callbackId: 'q1',
-        channel: 'C1',
-        threadTs: '1.1',
         questions: [],
       });
       expect(pm.hasPending).toBe(true);
@@ -321,11 +336,13 @@ describe('PermissionManager', () => {
 
   describe('staleCount()', () => {
     it('returns 0 when nothing is pending', () => {
+      jest.useRealTimers();
       expect(pm.staleCount(1000)).toBe(0);
+      jest.useFakeTimers();
     });
 
     it('returns count of items older than threshold', () => {
-      // Create items with timestamps in the past
+      jest.useRealTimers();
       const now = Date.now();
       jest.spyOn(Date, 'now')
         .mockReturnValueOnce(now - 5000)  // permission created 5s ago
@@ -345,8 +362,6 @@ describe('PermissionManager', () => {
 
       pm.askUserQuestion({
         callbackId: 'stale-q',
-        channel: 'C1',
-        threadTs: '1.1',
         questions: [],
       });
 
@@ -361,6 +376,7 @@ describe('PermissionManager', () => {
       expect(pm.staleCount(6000)).toBe(0);
 
       jest.restoreAllMocks();
+      jest.useFakeTimers();
     });
   });
 
@@ -381,8 +397,6 @@ describe('PermissionManager', () => {
 
       const qPromise = pm.askUserQuestion({
         callbackId: 'clear-q',
-        channel: 'C1',
-        threadTs: '1.1',
         questions: [],
       });
 

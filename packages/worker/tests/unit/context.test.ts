@@ -6,7 +6,6 @@ import { PersistenceAdapter } from '../../src/adapters/persistence-adapter.js';
 import { ProgressTracker } from '../../src/services/progress-tracker.js';
 import { ConfigOverrides } from '../../src/services/config-overrides.js';
 import { PermissionManager } from '../../src/services/permission-manager.js';
-import { InteractiveBridge } from '../../src/services/interactive-bridge.js';
 import { McpRegistry } from '../../src/services/mcp-registry.js';
 import { ClaudeSessionService } from '../../src/services/claude-session.js';
 import { WorkerLoop } from '../../src/orchestration/worker-loop.js';
@@ -39,8 +38,8 @@ function makeConfig(overrides: Partial<BuddyConfig> = {}): BuddyConfig {
     triggerEmoji: 'eyes',
     projectMappingsFile: '',
     mcpServers: {},
+    enabledMcpServers: [],
     plugins: [],
-    interactiveBridgePatterns: [],
     socketPath: '/tmp/test.sock',
     persistenceSocket: '/tmp/persistence.sock',
     gatewaySocket: '/tmp/gateway.sock',
@@ -84,7 +83,7 @@ describe('createWorkerContext', () => {
     expect(ctx.persistence).toBeDefined();
     expect(ctx.progress).toBeDefined();
     expect(ctx.permissions).toBeDefined();
-    expect(ctx.bridge).toBeDefined();
+    expect(ctx.interactiveBash).toBeDefined();
     expect(ctx.configOverrides).toBeDefined();
     expect(ctx.mcpRegistry).toBeDefined();
     expect(ctx.claudeSession).toBeDefined();
@@ -137,8 +136,8 @@ describe('createWorkerContext', () => {
     expect(ctx.permissions).toBeInstanceOf(PermissionManager);
   });
 
-  it('creates an InteractiveBridge instance', () => {
-    expect(ctx.bridge).toBeInstanceOf(InteractiveBridge);
+  it('creates an interactiveBash session', () => {
+    expect(ctx.interactiveBash).toBeDefined();
   });
 
   it('creates a McpRegistry instance', () => {

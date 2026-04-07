@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import type { App } from '@slack/bolt';
 import type { WorkerConfig, RpcClient, PersistenceHealth, WorkerHealth } from '@buddy/shared';
+import { isAuthorized } from './authorization.js';
 import type { Logger } from './logger.js';
 import type { GatewayConfig } from './config.js';
 import type { SessionRegistry } from './session-registry.js';
@@ -36,6 +37,13 @@ export class SlackRouter {
       // Record this message ts so the message handler skips it
       this.recentMentionTs.add(event.ts);
       setTimeout(() => this.recentMentionTs.delete(event.ts), 30_000);
+
+      // Authorization check — reject before any routing or spawning
+      const userId = event.user ?? (event as any).user;
+      if (userId && !isAuthorized(userId, event.channel, (event as any).channel_type, this.config.auth)) {
+        this.logger.warn('Unauthorized app_mention rejected', { userId, channel: event.channel });
+        return;
+      }
 
       const threadTs = event.thread_ts || event.ts;
       const threadKey = `${event.channel}:${threadTs}`;
@@ -80,6 +88,7 @@ export class SlackRouter {
           prompt: text,
           userId: event.user,
           teamId,
+          channelType: (event as any).channel_type ?? undefined,
           timestamp: Date.now(),
           messageTs: event.ts,
         });
@@ -91,6 +100,7 @@ export class SlackRouter {
         prompt: text,
         userId: event.user,
         teamId,
+        channelType: (event as any).channel_type ?? undefined,
         timestamp: Date.now(),
         messageTs: event.ts,
         ...(files.length > 0 && { files }),
@@ -112,6 +122,13 @@ export class SlackRouter {
       // so the timing-based recentMentionTs check above can miss.
       const botUserId = (context as any).botUserId;
       if (botUserId && text.includes(`<@${botUserId}>`)) return;
+
+      // Authorization check — reject before any routing or spawning
+      const userId = (event as any).user as string | undefined;
+      if (userId && !isAuthorized(userId, event.channel, (event as any).channel_type, this.config.auth)) {
+        this.logger.warn('Unauthorized message rejected', { userId, channel: event.channel });
+        return;
+      }
 
       const threadTs = (event as any).thread_ts || event.ts;
       const channel = event.channel;
@@ -153,6 +170,7 @@ export class SlackRouter {
           prompt: text,
           userId: (event as any).user,
           teamId: context.teamId ?? (body as any).team_id ?? (event as any).team,
+          channelType: (event as any).channel_type ?? undefined,
           timestamp: Date.now(),
           messageTs: event.ts,
         });
@@ -164,6 +182,7 @@ export class SlackRouter {
         prompt: text,
         userId: (event as any).user,
         teamId: context.teamId ?? (body as any).team_id ?? (event as any).team,
+        channelType: (event as any).channel_type ?? undefined,
         timestamp: Date.now(),
         messageTs: event.ts,
         ...(files.length > 0 && { files }),
@@ -245,7 +264,7 @@ export class SlackRouter {
       let callbackId = actionId;
       let threadKey = this.registry.getThreadForCallback(callbackId);
       if (!threadKey) {
-        const baseId = actionId.replace(/_(?:\d+|allow|always|deny|input(?:_\d+)?)$/, '');
+        const baseId = actionId.replace(/_(?:\d+|allow|always|deny|approve|reject|input(?:_\d+)?)$/, '');
         threadKey = this.registry.getThreadForCallback(baseId);
         if (threadKey) callbackId = baseId;
       }
@@ -485,6 +504,7 @@ export class SlackRouter {
       model: this.config.defaultModel,
       permissionMode: this.config.defaultPermissionMode,
       mcpServers: this.config.mcpServers,
+      anthropicApiKey: this.config.anthropicApiKey,
     };
   }
 }

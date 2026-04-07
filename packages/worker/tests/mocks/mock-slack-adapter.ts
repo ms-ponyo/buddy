@@ -42,7 +42,7 @@ export interface UploadRecord {
 
 export interface InteractivePromptRecord {
   callbackId: string;
-  promptType: 'permission' | 'question' | 'terminal';
+  promptType: 'permission' | 'question' | 'terminal' | 'planReview';
   display: unknown;
 }
 
@@ -58,7 +58,7 @@ export interface MockSlackAdapter {
   // Outbound queue methods
   postMessage: jest.Mock<Promise<{ ts: string }>, [string, string, string, unknown[]?]>;
   uploadFile: jest.Mock<Promise<{ fileId: string }>, [string, string, string, string, string?]>;
-  sendInteractivePrompt: jest.Mock<Promise<void>, [string, 'permission' | 'question' | 'terminal', unknown]>;
+  sendInteractivePrompt: jest.Mock<Promise<void>, [string, 'permission' | 'question' | 'terminal' | 'planReview', unknown]>;
 
   // Outbound queue methods (continued)
   appendToLastMessage: jest.Mock<Promise<void>, [string, string, string, unknown[]?]>;
@@ -82,6 +82,9 @@ export interface MockSlackAdapter {
   postMessageDirect: jest.Mock<Promise<{ ts: string }>, [string, string, string, unknown[]?]>;
   queueUpdateMessage: jest.Mock<Promise<void>, [string, string, string, unknown[]?]>;
   queueDeleteMessage: jest.Mock<Promise<void>, [string, string]>;
+
+  // Worker state
+  setWorkerState: jest.Mock<Promise<void>, [string]>;
 
   // Connection management
   connectGateway: jest.Mock<Promise<void>, []>;
@@ -117,7 +120,7 @@ export function mockSlackAdapter(): MockSlackAdapter {
       return { fileId: '' };
     }),
 
-    sendInteractivePrompt: jest.fn(async (callbackId: string, promptType: 'permission' | 'question' | 'terminal', display: unknown) => {
+    sendInteractivePrompt: jest.fn(async (callbackId: string, promptType: 'permission' | 'question' | 'terminal' | 'planReview', display: unknown) => {
       interactivePrompts.push({ callbackId, promptType, display });
     }),
 
@@ -166,6 +169,8 @@ export function mockSlackAdapter(): MockSlackAdapter {
     queueUpdateMessage: jest.fn(async (_channel: string, _ts: string, _text: string, _blocks?: unknown[]) => {}),
 
     queueDeleteMessage: jest.fn(async (_channel: string, _ts: string) => {}),
+
+    setWorkerState: jest.fn(async (_state: string) => {}),
 
     connectGateway: jest.fn(async () => {}),
     deregisterFromGateway: jest.fn(async () => {}),

@@ -7,6 +7,7 @@ export class RestartHandler {
     private app: App,
     private workerManager: WorkerManager,
     private logger: Logger,
+    private onRestart?: (threadKey: string) => void,
   ) {}
 
   private async postMessage(channel: string, threadTs: string, text: string): Promise<void> {
@@ -25,6 +26,7 @@ export class RestartHandler {
     }
 
     this.workerManager.kill(threadKey);
+    this.onRestart?.(threadKey);
 
     const build = await this.workerManager.rebuild();
     if (build.success) {
@@ -38,6 +40,7 @@ export class RestartHandler {
   async restart(threadKey: string, channel: string, threadTs: string): Promise<void> {
     this.logger.info('!restart: killing worker', { threadKey });
     this.workerManager.kill(threadKey);
+    this.onRestart?.(threadKey);
     await this.postMessage(channel, threadTs, 'Worker restarted — send a new message to continue.');
   }
 

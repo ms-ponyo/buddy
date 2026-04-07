@@ -1,14 +1,16 @@
-// src/util/authorization.ts — channel/user authorization check.
-// Ported from src/slack-handler/util/authorization.ts.
-// Uses BuddyConfig from types instead of the old Config type.
+// Gateway authorization — rejects unauthorized users before routing or spawning workers.
 
-import type { BuddyConfig } from '../types.js';
+export interface AuthConfig {
+  adminUserIds: string[];
+  allowedUserIds: string[];
+  allowedChannelIds: string[];
+}
 
 export function isAuthorized(
   userId: string,
   channelId: string,
   channelType: string | undefined,
-  config: Pick<BuddyConfig, 'adminUserIds' | 'allowedUserIds' | 'allowedChannelIds'>,
+  config: AuthConfig,
 ): boolean {
   // Admins always pass
   if (config.adminUserIds.length > 0 && config.adminUserIds.includes(userId)) {
@@ -19,7 +21,7 @@ export function isAuthorized(
     return false;
   }
   // DMs: only user allowlist applies (already passed above)
-  if (channelType === "im") {
+  if (channelType === 'im') {
     return true;
   }
   // Channels: channel allowlist must also pass (empty = no restriction)
@@ -27,4 +29,9 @@ export function isAuthorized(
     return false;
   }
   return true;
+}
+
+export function parseCommaSeparated(value: string | undefined): string[] {
+  if (!value) return [];
+  return value.split(',').map(s => s.trim()).filter(Boolean);
 }

@@ -1,6 +1,6 @@
 // src/orchestration/worker-loop.ts — Core orchestrator for a single thread's session lifecycle.
 // Ties together all services: ClaudeSessionService, ProgressTracker,
-// PermissionManager, InteractiveBridge, ConfigOverrides, McpRegistry, etc.
+// PermissionManager, ConfigOverrides, McpRegistry, etc.
 // Stream lifecycle is owned by the gateway; worker enqueues stream messages.
 // Ported from src/slack-handler/core/worker.ts runWorker() (532 lines → class-based).
 
@@ -20,7 +20,6 @@ import type { PersistenceAdapter } from '../adapters/persistence-adapter.js';
 import type { ClaudeSessionService } from '../services/claude-session.js';
 import type { ProgressTracker } from '../services/progress-tracker.js';
 import type { PermissionManager } from '../services/permission-manager.js';
-import type { InteractiveBridge } from '../services/interactive-bridge.js';
 import type { ConfigOverrides } from '../services/config-overrides.js';
 import type { McpRegistry } from '../services/mcp-registry.js';
 import { writeFileSync, mkdirSync } from 'fs';
@@ -31,10 +30,10 @@ import { withRetry, isAuthError } from '../util/retry.js';
 import { formatExecutionLog, buildCompletionContextBlock } from '../util/execution-log.js';
 import { splitMarkdownIntoMessages } from '../util/format.js';
 import { buildFileHints } from '../util/file-helpers.js';
-import { consumeForkedHistory } from '../util/thread-history.js';
+import { consumeForkedHistory, fetchAndFormatThreadHistory } from '../util/thread-history.js';
 import { swapReactions } from '../ui/reaction-manager.js';
 import { createCanUseToolHook } from '../hooks/can-use-tool.js';
-import { createPreToolUseHook } from '../hooks/pre-tool-use.js';
+import { createPreToolUseHook, type PreToolUseSharedState } from '../hooks/pre-tool-use.js';
 
 // Slack rejects messages whose payload exceeds ~40 KB.  The gateway
 // already splits text into 3 000-char blocks, but the raw `text` field
@@ -109,7 +108,6 @@ export interface WorkerLoopDeps {
   claudeSession: ClaudeSessionService;
   progress: ProgressTracker;
   permissions: PermissionManager;
-  bridge: InteractiveBridge;
   configOverrides: ConfigOverrides;
   mcpRegistry: McpRegistry;
   logger: Logger;
@@ -127,7 +125,6 @@ export class WorkerLoop {
   private readonly claudeSession: ClaudeSessionService;
   private readonly progress: ProgressTracker;
   private readonly permissions: PermissionManager;
-  private readonly bridge: InteractiveBridge;
   private readonly configOverrides: ConfigOverrides;
   private readonly mcpRegistry: McpRegistry;
   private readonly logger: Logger;
@@ -135,15 +132,18 @@ export class WorkerLoop {
   private readonly channel: string;
   private readonly threadTs: string;
 
-  private userId: string | null = null;
+  private _userId: string | null = null;
   private sessionId: string | null = null;
   private inputQueue: AsyncInputQueue<SDKUserMessage> | null = null;
   private _currentExecution: ActiveExecution | null = null;
   private _lastActivityAt: number = Date.now();
   private _interrupted = false;
+  private _shuttingDown = false;
   private _messageTimestamps: string[] = [];
   /** Name of currently executing tool (set on onToolUse, cleared on onToolResult). */
   private _activeToolName: string | null = null;
+  /** Shared state for PreToolUse hooks — survives across session restarts. */
+  private readonly _preToolUseState: PreToolUseSharedState = {};
 
   /** Per-message turn completion tracking (FIFO). Each entry is resolved
    *  by onTurnResult when the SDK finishes processing that message. */
@@ -158,7 +158,6 @@ export class WorkerLoop {
     this.claudeSession = deps.claudeSession;
     this.progress = deps.progress;
     this.permissions = deps.permissions;
-    this.bridge = deps.bridge;
     this.configOverrides = deps.configOverrides;
     this.mcpRegistry = deps.mcpRegistry;
     this.logger = deps.logger;
@@ -209,12 +208,12 @@ export class WorkerLoop {
       this._turnCompletions.push({ ack: onResponsePosted, resolve });
     });
 
-    if (userId) this.userId = userId;
+    if (userId) this._userId = userId;
 
     if (this.inputQueue && !this.inputQueue.closed) {
       // Session alive — enqueue directly and restart the stream
       this.enqueueToSDK(this.inputQueue, buffered);
-      await this.slack.enqueueOutbound({ type: 'stream_start', channel: this.channel, threadTs: this.threadTs, userId: this.userId ?? '' });
+      await this.slack.enqueueOutbound({ type: 'stream_start', channel: this.channel, threadTs: this.threadTs, userId: this._userId ?? '' });
       await turnDone;
       return;
     }
@@ -250,6 +249,7 @@ export class WorkerLoop {
    * Caps the wait at {@link timeoutMs} to avoid blocking shutdown forever.
    */
   async interruptAndWait(timeoutMs = 7_000): Promise<void> {
+    this._shuttingDown = true;
     const sessionPromise = this._activeSessionPromise;
     this.interrupt();
     if (!sessionPromise) return;
@@ -266,10 +266,15 @@ export class WorkerLoop {
    * True if any service is awaiting user interaction.
    */
   get awaitingUserInput(): boolean {
-    return (
-      this.permissions.hasPending ||
-      this.bridge.hasPending
-    );
+    return this.permissions.hasPending;
+  }
+
+  /**
+   * True when interruptAndWait() was called (process shutdown).
+   * Used by MessageHandler to skip acking messages so they can be recovered.
+   */
+  get shuttingDown(): boolean {
+    return this._shuttingDown;
   }
 
   // ── lastActivityAge ───────────────────────────────────────────────
@@ -281,9 +286,18 @@ export class WorkerLoop {
     return Date.now() - this._lastActivityAt;
   }
 
+  /** Update last-activity timestamp (e.g. when a permission prompt is resolved). */
+  touchActivity(): void {
+    this._lastActivityAt = Date.now();
+  }
+
   /** Name of tool currently being executed, or null if idle between tools. */
   get activeToolName(): string | null {
     return this._activeToolName;
+  }
+
+  get currentUserId(): string {
+    return this._userId ?? '';
   }
 
   // ── currentExecution ──────────────────────────────────────────────
@@ -301,7 +315,7 @@ export class WorkerLoop {
    * Only returns when the session is interrupted or an unrecoverable error occurs.
    */
   private async runSession(firstMsg: BufferedMessage): Promise<void> {
-    if (firstMsg.userId) this.userId = firstMsg.userId;
+    if (firstMsg.userId) this._userId = firstMsg.userId;
     const effectiveConfig = this.configOverrides.resolveConfig(this.config);
     const execLog: ExecEntry[] = [];
 
@@ -328,7 +342,19 @@ export class WorkerLoop {
     this.inputQueue = queue;
 
     // Build prompt (with forked history injection if present)
-    const prompt = this.buildPrompt(firstMsg);
+    let prompt = this.buildPrompt(firstMsg);
+
+    // If no session exists, check if the thread has prior bot activity.
+    // This covers the case where retryAsNewSession() previously failed:
+    // the old session was deleted, but the retry invoke also crashed,
+    // so the next worker starts with no session and no history.
+    if (!this.sessionId) {
+      const historyPrefix = await this.loadLostSessionHistory();
+      if (historyPrefix) {
+        prompt = historyPrefix + prompt;
+      }
+    }
+
     queue.enqueue({
       type: 'user' as const,
       message: { role: 'user' as const, content: prompt },
@@ -353,12 +379,17 @@ export class WorkerLoop {
       this.progress.finalizeCurrentCard();
       const finalMainChunks = this.progress.buildMainChunks();
       if (finalMainChunks.length) {
-        this.slack.enqueueOutbound({ type: 'stream_chunk', channel: this.channel, threadTs: this.threadTs, userId: this.userId ?? '', streamType: 'main', chunks: finalMainChunks } as StreamMessage)
+        this.slack.enqueueOutbound({ type: 'stream_chunk', channel: this.channel, threadTs: this.threadTs, userId: this._userId ?? '', streamType: 'main', chunks: finalMainChunks } as StreamMessage)
           .catch((err) => this.logger.warn('Failed to enqueue final main chunks', { error: String(err) }));
+      }
+      // Upload full content for any remaining truncated edits/creates
+      for (const upload of this.progress.drainPendingUploads()) {
+        this.slack.uploadContent(this.channel, this.threadTs, upload.filename, upload.content, upload.caption)
+          .catch((err) => this.logger.warn('Truncated content upload failed', { error: String(err) }));
       }
       const finalTodoChunks = this.progress.buildTodoChunks();
       if (finalTodoChunks.length) {
-        this.slack.enqueueOutbound({ type: 'stream_chunk', channel: this.channel, threadTs: this.threadTs, userId: this.userId ?? '', streamType: 'todo', chunks: finalTodoChunks } as StreamMessage)
+        this.slack.enqueueOutbound({ type: 'stream_chunk', channel: this.channel, threadTs: this.threadTs, userId: this._userId ?? '', streamType: 'todo', chunks: finalTodoChunks } as StreamMessage)
           .catch((err) => this.logger.warn('Failed to enqueue final todo chunks', { error: String(err) }));
       }
       this.slack.enqueueOutbound({ type: 'stream_stop', channel: this.channel, threadTs: this.threadTs, streamTypes: ['main'] })
@@ -426,7 +457,6 @@ export class WorkerLoop {
       const usage = result.usage;
       const effort = this.configOverrides.getEffort() ?? 'medium';
       const mode = this.configOverrides.getPermissionMode()
-        ?? this.claudeSession.getInitInfo()?.permissionMode
         ?? effectiveConfig.permissionMode;
       const ctxPct = usage.contextWindowPercent > 0 ? usage.contextWindowPercent : 0;
       const filledBlocks = Math.round((ctxPct / 100) * 10);
@@ -457,6 +487,15 @@ export class WorkerLoop {
       touchActivity,
       onToolStart: (toolName: string) => { this._activeToolName = toolName; },
       onToolEnd: () => { this._activeToolName = null; },
+      onToolUseTracked: (toolName: string, input: Record<string, unknown>) => {
+        executionState.toolCount++;
+        if (
+          (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') &&
+          typeof input.file_path === 'string'
+        ) {
+          executionState.filesChanged.add(input.file_path);
+        }
+      },
       onImageContent: (imageData: Buffer, mediaType: string, toolName?: string) => {
         // Delegate to slack upload (fire-and-forget)
         this.logger.debug('Image content received', { toolName, mediaType });
@@ -467,19 +506,28 @@ export class WorkerLoop {
         if (chunks.length === 0) return;
         this.slack.enqueueOutbound({
           type: 'stream_chunk', channel: this.channel, threadTs: this.threadTs,
-          userId: this.userId ?? '', streamType: 'main', chunks,
+          userId: this._userId ?? '', streamType: 'main', chunks,
         } as StreamMessage).catch((err) => {
           this.logger.warn('Main chunk enqueue failed', {
             error: err instanceof Error ? err.message : String(err),
           });
         });
+        // Upload full content for truncated edits/creates
+        for (const upload of this.progress.drainPendingUploads()) {
+          this.slack.uploadContent(this.channel, this.threadTs, upload.filename, upload.content, upload.caption)
+            .catch((err) => {
+              this.logger.warn('Truncated content upload failed', {
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+        }
       },
       enqueueTodoChunks: () => {
         const chunks = this.progress.buildTodoChunks();
         if (chunks.length === 0) return;
         this.slack.enqueueOutbound({
           type: 'stream_chunk', channel: this.channel, threadTs: this.threadTs,
-          userId: this.userId ?? '', streamType: 'todo', chunks,
+          userId: this._userId ?? '', streamType: 'todo', chunks,
         } as StreamMessage).catch((err) => {
           this.logger.warn('Todo chunk enqueue failed', {
             error: err instanceof Error ? err.message : String(err),
@@ -506,8 +554,12 @@ export class WorkerLoop {
       },
     });
 
+    // Notify gateway this worker is now busy
+    this.slack.setWorkerState('busy')
+      .catch((err) => this.logger.warn('Failed to set worker state to busy', { error: String(err) }));
+
     // Start the Slack stream (shows "Working..." indicator + tool progress)
-    await this.slack.enqueueOutbound({ type: 'stream_start', channel: this.channel, threadTs: this.threadTs, userId: this.userId ?? '' });
+    await this.slack.enqueueOutbound({ type: 'stream_start', channel: this.channel, threadTs: this.threadTs, userId: this._userId ?? '' });
 
     // Create MCP servers
     const mcpServers = this.mcpRegistry.createServers(
@@ -522,18 +574,20 @@ export class WorkerLoop {
       logger: this.logger,
       channel: this.channel,
       threadTs: this.threadTs,
-      previewMode: effectiveConfig.previewMode as 'off' | 'destructive' | 'moderate',
-      projectDir: effectiveConfig.projectDir,
     });
 
     const preToolUseMatchers = createPreToolUseHook({
-      bridge: this.bridge,
       permissions: this.permissions,
-      configOverrides: this.configOverrides,
       logger: this.logger,
       channel: this.channel,
       threadTs: this.threadTs,
-      interactivePatterns: (effectiveConfig.interactiveBridgePatterns ?? []).map(p => p.base),
+      projectDir: effectiveConfig.projectDir,
+      sharedState: this._preToolUseState,
+      persistence: this.persistence,
+      onPermissionModeChange: (mode) => {
+        this.configOverrides.setPermissionMode(mode);
+        this.claudeSession.setPermissionMode(mode);
+      },
     });
 
     const hooks = { PreToolUse: preToolUseMatchers };
@@ -575,6 +629,9 @@ export class WorkerLoop {
       // Drain any pending turn completions (e.g. if session died mid-turn)
       for (const turn of this._turnCompletions) turn.resolve();
       this._turnCompletions = [];
+      // Notify gateway this worker is now idle
+      this.slack.setWorkerState('idle')
+        .catch((err) => this.logger.warn('Failed to set worker state to idle', { error: String(err) }));
     }
   }
 
@@ -749,6 +806,55 @@ export class WorkerLoop {
       extraOptions,
       projectDir: config.projectDir,
     });
+  }
+
+  // ── loadLostSessionHistory ──────────────────────────────────────────
+
+  /**
+   * Check if a thread has prior bot activity but no session (e.g. after
+   * retryAsNewSession() itself crashed). If so, fetch thread history
+   * and return a prompt prefix for context recovery.
+   */
+  private async loadLostSessionHistory(): Promise<string | null> {
+    try {
+      const result = await fetchAndFormatThreadHistory(
+        this.slack, this.channel, this.threadTs, this.logger,
+      );
+      if (!result) return null;
+
+      // Only inject if there are bot messages (indicating prior bot activity)
+      const hasBotMessages = result.messages.some(m => m.isBot);
+      if (!hasBotMessages) return null;
+
+      this.logger.info('No session but thread has prior bot activity — injecting history', {
+        messageCount: result.messageCount,
+      });
+
+      // Save to file so the model can Read selectively
+      const histDir = join(process.cwd(), 'data', 'thread-history');
+      mkdirSync(histDir, { recursive: true });
+      const histFile = join(histDir, `${this.channel}_${this.threadTs}.txt`);
+      writeFileSync(histFile, result.formatted);
+
+      // Post a warning so the user knows context was recovered
+      await this.slack.postMessage(
+        this.channel,
+        this.threadTs,
+        ':warning: No session found for this thread. Replaying thread history into a new conversation.',
+        [{ type: 'markdown', text: ':warning: No session found for this thread. Replaying thread history into a new conversation.' }],
+      ).catch(() => {}); // best-effort
+
+      return (
+        `[Previous conversation from this Slack thread — your session was reset]\n` +
+        `Full thread history (${result.messageCount} messages) saved to: ${histFile}\n` +
+        `Read this file for context before responding.\n\n`
+      );
+    } catch (err) {
+      this.logger.warn('Failed to check thread history for lost session', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   // ── onSessionError ────────────────────────────────────────────────

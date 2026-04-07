@@ -6,6 +6,7 @@ export interface WorkerConfig {
   mcpServers: Record<string, McpServerConfig>;
   projectDir?: string;
   settingSources?: string[];
+  anthropicApiKey?: string;
 }
 
 export interface McpServerConfig {
@@ -48,6 +49,10 @@ export interface PromptDisplay {
   tools?: Array<{ tool: string; description: string }>;
   /** AskUserQuestion: array of questions with headers, text, and options. */
   questions?: Array<{ header: string; question: string; options: Array<{ label: string; value: string }> }>;
+  /** Plan review: pre-built Slack blocks for the plan content + approve/reject buttons. */
+  planBlocks?: object[];
+  /** Plan review: when block count exceeds 50, content is split across messages. */
+  planSplitMessages?: object[][];
 }
 
 export interface PromptOption {

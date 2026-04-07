@@ -5,9 +5,13 @@
 // prompts via idle-timeout heuristics, and fires callbacks.
 
 import * as nodePty from 'node-pty';
-import type { MenuOption } from '../ui/interactive-blocks.js';
 
 // ── Types ─────────────────────────────────────────────────────────
+
+export interface MenuOption {
+  label: string;
+  value: string;
+}
 
 export type PromptType = 'text' | 'yesno' | 'password' | 'press_enter' | 'menu';
 
@@ -116,7 +120,13 @@ export function createPtyFactory(): PtyFactory {
       cols: 200,
       rows: 50,
       cwd: opts.cwd ?? process.cwd(),
-      env: process.env as Record<string, string>,
+      env: {
+        ...process.env as Record<string, string>,
+        // Signal headless/remote to child processes so OAuth flows print URLs
+        // to stdout instead of opening a browser on the server.
+        // openclaw's isRemoteEnvironment() checks SSH_TTY.
+        SSH_TTY: process.env.SSH_TTY || '/dev/pts/headless',
+      },
     });
 
     let rawOutput = '';

@@ -16,6 +16,7 @@ import {
   friendlyToolLabel,
 } from '../ui/dispatch-blocks.js';
 import { createDispatchControlRpcServer } from '../mcp-servers/dispatch-control-rpc-server.js';
+import type { BotCommandRouter } from '../services/bot-command-router.js';
 
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -23,8 +24,8 @@ const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
 const DISPATCH_BASE_PROMPT =
   'You are a concise command assistant. Answer in 1-2 sentences. ' +
-  'You can control execution (stop, background), switch modes/models, check status, fork threads, ' +
-  'and execute bot commands (clear, compact, cost, model, mode, project) via your MCP tools. ' +
+  'You can control execution, switch modes/models, check status, fork threads, ' +
+  'and execute bot commands via your MCP tools. ' +
   'When users ask for bot commands, ALWAYS use the execute_bot_command tool to run them directly — never tell users to type commands themselves. ' +
   'Do NOT perform complex coding tasks — delegate those to the main worker.';
 
@@ -39,6 +40,7 @@ export interface DispatchHandlerDeps {
   config: BuddyConfig;
   remoteConfig: RemoteConfigOverrides;
   mainWorkerRpc: RpcClient;
+  botCommandRouter: BotCommandRouter;
 }
 
 // ── DispatchHandler ──────────────────────────────────────────────────
@@ -53,6 +55,7 @@ export class DispatchHandler {
   private readonly config: BuddyConfig;
   private readonly remoteConfig: RemoteConfigOverrides;
   private readonly mainWorkerRpc: RpcClient;
+  private readonly botCommandRouter: BotCommandRouter;
 
   private messageTs: string | null = null;
   private inputQueue: AsyncInputQueue<SDKUserMessage> | null = null;
@@ -73,6 +76,7 @@ export class DispatchHandler {
     this.config = deps.config;
     this.remoteConfig = deps.remoteConfig;
     this.mainWorkerRpc = deps.mainWorkerRpc;
+    this.botCommandRouter = deps.botCommandRouter;
   }
 
   // ── feed — enqueue a message for the dispatch LLM ──────────────────
@@ -107,6 +111,24 @@ export class DispatchHandler {
         this.logger.error('DispatchHandler: session error', { error: String(err) });
         this.stop().catch(() => {});
       });
+    } else {
+      // New message while already running — delete old message and post a fresh one
+      const oldTs = this.messageTs;
+      if (oldTs) {
+        this.slack.queueDeleteMessage(this.channel, oldTs).catch(() => {});
+      }
+      try {
+        const { ts } = await this.slack.postMessageDirect(
+          this.channel,
+          this.threadTs,
+          '_Dispatch session active\u2026_',
+          buildDispatchBlocks(this.threadKey),
+        );
+        this.messageTs = ts;
+        this.logger.debug('DispatchHandler: replaced dispatch message', { oldTs, newTs: ts });
+      } catch (err) {
+        this.logger.warn('DispatchHandler: failed to post replacement message', { error: String(err) });
+      }
     }
 
     this.lastUserText = text;
@@ -230,7 +252,7 @@ export class DispatchHandler {
         extraOptions: {
           tools: ['Read'],
           agents: {},
-          systemPrompt: DISPATCH_BASE_PROMPT,
+          systemPrompt: DISPATCH_BASE_PROMPT + '\n\n' + this.botCommandRouter.getFormattedCatalog(),
           settingSources: [],  // Don't load global skills/plugins/MCPs
         },
       });

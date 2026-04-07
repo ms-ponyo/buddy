@@ -13,8 +13,8 @@ describe('buildPlanReviewBlocks', () => {
 
     const blocksJson = JSON.stringify(result.blocks);
     expect(blocksJson).toContain('plan-001');
-    expect(blocksJson).toContain('plan_approve');
-    expect(blocksJson).toContain('plan_reject');
+    expect(blocksJson).toContain('plan-001_approve');
+    expect(blocksJson).toContain('plan-001_reject');
     expect(blocksJson).toContain('Plan for Review');
   });
 
@@ -55,7 +55,7 @@ describe('buildPlanReviewBlocks', () => {
       // The last split message should contain the approve/reject buttons
       const lastMsg = result.splitMessages[result.splitMessages.length - 1];
       const lastJson = JSON.stringify(lastMsg);
-      expect(lastJson).toContain('plan_approve');
+      expect(lastJson).toContain('plan-004_approve');
     } else {
       // If the plan is short enough, blocks are used directly
       expect(result.blocks.length).toBeLessThanOrEqual(50);

@@ -110,6 +110,7 @@ export class HealthMonitor {
         model: this.config.defaultModel,
         permissionMode: this.config.defaultPermissionMode,
         mcpServers: this.config.mcpServers,
+        anthropicApiKey: this.config.anthropicApiKey,
       };
       this.workerManager.spawn(threadKey, workerConfig);
       const detail = reason ? `Worker was killed: ${reason}.` : 'Worker became unresponsive.';

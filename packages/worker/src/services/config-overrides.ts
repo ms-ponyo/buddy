@@ -16,7 +16,8 @@ export class ConfigOverrides {
   private effort: EffortLevel | undefined;
   private budget: number | undefined;
   private permissionMode: ThreadPermissionMode | undefined;
-  private fallbackModel: string | undefined;
+
+  private projectDir: string | undefined;
   private agent: string | undefined;
   private systemPromptAppend: string | undefined;
   private toolOverrides: ToolOverrides | undefined;
@@ -65,18 +66,14 @@ export class ConfigOverrides {
     return this.permissionMode;
   }
 
-  // ── Fallback Model ──────────────────────────────────────────────
+  // ── Project Dir ────────────────────────────────────────────────
 
-  setFallbackModel(model: string): void {
-    this.fallbackModel = model;
+  setProjectDir(dir: string): void {
+    this.projectDir = dir;
   }
 
-  getFallbackModel(): string | undefined {
-    return this.fallbackModel;
-  }
-
-  deleteFallbackModel(): void {
-    this.fallbackModel = undefined;
+  getProjectDir(): string | undefined {
+    return this.projectDir;
   }
 
   // ── Agent ───────────────────────────────────────────────────────
@@ -128,7 +125,7 @@ export class ConfigOverrides {
     this.effort = undefined;
     this.budget = undefined;
     this.permissionMode = undefined;
-    this.fallbackModel = undefined;
+    this.projectDir = undefined;
     this.agent = undefined;
     this.systemPromptAppend = undefined;
     this.toolOverrides = undefined;
@@ -149,6 +146,10 @@ export class ConfigOverrides {
 
     if (this.permissionMode !== undefined) {
       resolved.permissionMode = this.permissionMode;
+    }
+
+    if (this.projectDir !== undefined) {
+      resolved.projectDir = this.projectDir;
     }
 
     return resolved;

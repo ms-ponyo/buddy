@@ -80,6 +80,10 @@ const server = new RpcServer({
         if (sub.threadKey) {
           queueService.resetForThread(sub.threadKey, sub.queue);
           logger.info('Reset queue entries for disconnected subscriber', { threadKey: sub.threadKey, queue: sub.queue });
+        } else {
+          // Wildcard subscription (e.g. gateway on outbound) — reset ALL delivered messages for this queue
+          queueService.resetForQueue(sub.queue);
+          logger.info('Reset all queue entries for disconnected wildcard subscriber', { queue: sub.queue });
         }
       }
     }

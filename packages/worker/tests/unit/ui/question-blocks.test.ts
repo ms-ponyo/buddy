@@ -2,7 +2,7 @@
 import { buildQuestionBlocks } from '../../../src/ui/question-blocks.js';
 
 describe('buildQuestionBlocks', () => {
-  it('builds blocks for a single question with options', () => {
+  it('builds blocks for a single question with radio buttons', () => {
     const result = buildQuestionBlocks({
       requestId: 'req-001',
       questions: [
@@ -27,9 +27,10 @@ describe('buildQuestionBlocks', () => {
     expect(blocksJson).toContain('Red');
     expect(blocksJson).toContain('Blue');
     expect(blocksJson).toContain('req-001');
+    expect(blocksJson).toContain('radio_buttons');
   });
 
-  it('builds blocks for multiple questions', () => {
+  it('only renders the first question when multiple are provided', () => {
     const result = buildQuestionBlocks({
       requestId: 'req-002',
       questions: [
@@ -50,9 +51,19 @@ describe('buildQuestionBlocks', () => {
 
     const blocksJson = JSON.stringify(result.blocks);
     expect(blocksJson).toContain('Q1');
-    expect(blocksJson).toContain('Q2');
     expect(blocksJson).toContain('First question');
-    expect(blocksJson).toContain('Second question');
+    // Second question should NOT be in the same message
+    expect(blocksJson).not.toContain('Q2');
+    expect(blocksJson).not.toContain('Second question');
+  });
+
+  it('returns empty blocks for no questions', () => {
+    const result = buildQuestionBlocks({
+      requestId: 'req-empty',
+      questions: [],
+    });
+
+    expect(result.blocks).toEqual([]);
   });
 
   it('includes text input block for custom answers', () => {
@@ -73,7 +84,7 @@ describe('buildQuestionBlocks', () => {
     expect(blocksJson).toContain('Or type your answer');
   });
 
-  it('truncates long option labels to 75 chars', () => {
+  it('preserves full option labels in radio buttons', () => {
     const longLabel = 'A'.repeat(100);
     const result = buildQuestionBlocks({
       requestId: 'req-004',
@@ -88,12 +99,10 @@ describe('buildQuestionBlocks', () => {
     });
 
     const blocksJson = JSON.stringify(result.blocks);
-    // The label in the button should be truncated
-    expect(blocksJson).not.toContain(longLabel);
-    expect(blocksJson).toContain('A'.repeat(75));
+    expect(blocksJson).toContain(longLabel);
   });
 
-  it('includes correct action_id pattern with question and option indices', () => {
+  it('uses radio_buttons with correct action_id', () => {
     const result = buildQuestionBlocks({
       requestId: 'req-005',
       questions: [
@@ -110,7 +119,99 @@ describe('buildQuestionBlocks', () => {
     });
 
     const blocksJson = JSON.stringify(result.blocks);
-    expect(blocksJson).toContain('question_answer_0_0');
-    expect(blocksJson).toContain('question_answer_0_1');
+    expect(blocksJson).toContain('radio_buttons');
+    expect(blocksJson).toContain('question_answer_0');
+    // Both options should be in the same radio_buttons element
+    expect(blocksJson).toContain('Opt0');
+    expect(blocksJson).toContain('Opt1');
+  });
+
+  it('renders preview content as markdown blocks below radio buttons', () => {
+    const result = buildQuestionBlocks({
+      requestId: 'req-006',
+      questions: [
+        {
+          header: 'Approach',
+          question: 'Which implementation?',
+          options: [
+            { label: 'Option A', description: 'Simple', preview: '```ts\nconsole.log("A")\n```' },
+            { label: 'Option B', description: 'Complex' },
+          ],
+          multiSelect: false,
+        },
+      ],
+    });
+
+    const blocksJson = JSON.stringify(result.blocks);
+    // Should have a divider before previews
+    expect(blocksJson).toContain('"type":"divider"');
+    // Should have a markdown block for Option A's preview
+    expect(blocksJson).toContain('"type":"markdown"');
+    expect(blocksJson).toContain('**Option A**');
+    expect(blocksJson).toContain('console.log');
+    // Option B has no preview, should not appear in markdown blocks
+    expect(blocksJson).not.toContain('**Option B**');
+  });
+
+  it('skips preview section when no options have previews', () => {
+    const result = buildQuestionBlocks({
+      requestId: 'req-007',
+      questions: [
+        {
+          header: 'H',
+          question: 'Q',
+          options: [
+            { label: 'A', description: 'desc A' },
+            { label: 'B', description: 'desc B' },
+          ],
+          multiSelect: false,
+        },
+      ],
+    });
+
+    const blocksJson = JSON.stringify(result.blocks);
+    expect(blocksJson).not.toContain('"type":"divider"');
+    expect(blocksJson).not.toContain('"type":"markdown"');
+  });
+
+  it('uses checkboxes when multiSelect is true', () => {
+    const result = buildQuestionBlocks({
+      requestId: 'req-008',
+      questions: [
+        {
+          header: 'Features',
+          question: 'Which features?',
+          options: [
+            { label: 'Auth', description: '' },
+            { label: 'Logging', description: '' },
+          ],
+          multiSelect: true,
+        },
+      ],
+    });
+
+    const blocksJson = JSON.stringify(result.blocks);
+    expect(blocksJson).toContain('checkboxes');
+    expect(blocksJson).not.toContain('radio_buttons');
+  });
+
+  it('includes description on radio options when provided', () => {
+    const result = buildQuestionBlocks({
+      requestId: 'req-009',
+      questions: [
+        {
+          header: 'H',
+          question: 'Q',
+          options: [
+            { label: 'A', description: 'Explanation of A' },
+            { label: 'B', description: '' },
+          ],
+          multiSelect: false,
+        },
+      ],
+    });
+
+    const blocksJson = JSON.stringify(result.blocks);
+    expect(blocksJson).toContain('Explanation of A');
   });
 });

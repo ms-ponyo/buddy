@@ -17,8 +17,8 @@ describe('config', () => {
     it('loads defaults from env', () => {
       const config = loadConfig();
       expect(config.projectDir).toBe('/tmp/test-project');
-      expect(config.claudeModel).toBe('claude-opus-4-6');
-      expect(config.logLevel).toBe('info');
+      expect(config.claudeModel).toBe('opus[1m]');
+      expect(config.logLevel).toBe('debug');
     });
 
     it('throws if PROJECT_DIR is missing', () => {
