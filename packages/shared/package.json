@@ -1,0 +1,14 @@
+{
+  "name": "@buddy/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

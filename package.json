@@ -1,0 +1,41 @@
+{
+  "name": "buddy",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "workspaces": [
+    "packages/shared",
+    "packages/gateway",
+    "packages/worker",
+    "packages/persistence"
+  ],
+  "scripts": {
+    "build": "npm run build -w packages/shared && npm run build -w packages/gateway && npm run build -w packages/worker && npm run build -w packages/persistence",
+    "build:shared": "npm run build -w packages/shared",
+    "build:gateway": "npm run build -w packages/shared && npm run build -w packages/gateway",
+    "build:worker": "npm run build -w packages/shared && npm run build -w packages/worker",
+    "build:persistence": "npm run build -w packages/persistence",
+    "start": "npm run start -w packages/gateway",
+    "dev": "npm run build && npm run start",
+    "restart": "pkill -f 'buddy-(gateway|worker|persistence)' 2>/dev/null; sleep 2; pkill -9 -f 'buddy-(gateway|worker|persistence)' 2>/dev/null; sleep 1; rm -f /tmp/buddy/*.sock data/gateway.pid; npm install && npm run build && npm run start",
+    "clean": "npm run clean --workspaces",
+    "test": "NODE_OPTIONS='--experimental-vm-modules' npx jest",
+    "test:unit": "NODE_OPTIONS='--experimental-vm-modules' npx jest --selectProjects unit",
+    "test:integration": "NODE_OPTIONS='--experimental-vm-modules' npx jest --selectProjects integration",
+    "test:e2e": "NODE_OPTIONS='--experimental-vm-modules' npx jest --selectProjects e2e",
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' npx jest --watch"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^25.5.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6",
+    "typescript": "^5.9.3"
+  },
+  "volta": {
+    "node": "24.14.0"
+  }
+}

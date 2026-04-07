@@ -1,0 +1,25 @@
+{
+  "name": "@buddy/persistence",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js",
+    "./database": "./src/database.ts",
+    "./registry-service": "./src/registry-service.ts",
+    "./health-service": "./src/health-service.ts",
+    "./queue-service": "./src/queue-service.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@buddy/shared": "*",
+    "better-sqlite3": "^12.8.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.0.0",
+    "typescript": "^5.9.3"
+  }
+}

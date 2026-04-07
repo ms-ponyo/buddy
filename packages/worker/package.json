@@ -1,0 +1,28 @@
+{
+  "name": "@buddy/worker",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "NODE_OPTIONS='--experimental-vm-modules' npx jest",
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' npx jest --watch",
+    "postinstall": "node -e \"if(process.platform==='darwin'){const{execSync:e}=require('child_process');try{e('codesign -s - node_modules/node-pty/build/Release/pty.node',{stdio:'pipe'})}catch{}}\""
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.77",
+    "@buddy/shared": "1.0.0",
+    "dotenv": "^17.3.1",
+    "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "jest": "^30.3.0",
+    "ts-jest": "^29.4.6",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

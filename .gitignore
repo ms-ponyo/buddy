@@ -1,0 +1,13 @@
+node_modules/
+dist/
+packages/*/dist/
+.env
+*.tsbuildinfo
+logs/
+data/
+.worktrees/
+.DS_Store
+.worktrees/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
