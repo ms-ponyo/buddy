@@ -8,6 +8,16 @@ Run it on the same machine as Claude Code and it picks up your existing auth, pl
 
 Same brain. Same tools. Any device. Any time.
 
+<p align="center">
+  <img src="docs/images/planning-desktop.png" width="49%" alt="Planning on desktop" />
+  <img src="docs/images/executing-desktop.png" width="49%" alt="Executing tasks on desktop" />
+</p>
+<p align="center">
+  <img src="docs/images/planning-mobile.png" width="24%" alt="Planning on mobile" />
+  <img src="docs/images/executing-mobile.png" width="24%" alt="Executing tasks on mobile" />
+  <img src="docs/images/diff-mobile.png" width="24%" alt="Inline diffs on mobile" />
+</p>
+
 ---
 
 ## 🤔 Why not just use Claude Code?
