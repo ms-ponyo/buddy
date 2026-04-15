@@ -10,7 +10,7 @@
     "dev": "tsx src/index.ts",
     "test": "NODE_OPTIONS='--experimental-vm-modules' npx jest",
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' npx jest --watch",
-    "postinstall": "node -e \"if(process.platform==='darwin'){const{execSync:e}=require('child_process');try{e('codesign -s - node_modules/node-pty/build/Release/pty.node',{stdio:'pipe'})}catch{}}\""
+    "postinstall": "node -e \"if(process.platform==='darwin'){const{execSync:e}=require('child_process'),p='node_modules/node-pty/prebuilds/darwin-'+process.arch;try{e('chmod +x '+p+'/spawn-helper',{stdio:'pipe'})}catch{};try{e('codesign -s - '+p+'/pty.node',{stdio:'pipe'})}catch{}}\""
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.77",
